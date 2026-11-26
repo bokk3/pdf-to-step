@@ -1,0 +1,289 @@
+// Strict mirror of backend/app/schemas/part_spec.py (PartSpec v1.0, ARCHITECTURE.md §6). Keep in sync.
+
+export const REVIEW_CONFIDENCE_THRESHOLD = 0.85
+
+export type Face = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right'
+export const FACES: Face[] = ['top', 'bottom', 'front', 'back', 'left', 'right']
+export type DatumOrigin = 'bottom_left_top_face' | 'bottom_left_bottom_face' | 'center_top_face' | 'center_bottom_face'
+export const DATUMS: DatumOrigin[] = ['bottom_left_top_face', 'bottom_left_bottom_face', 'center_top_face', 'center_bottom_face']
+export type XY = [number, number]
+
+export interface Stock {
+  length_x: number
+  width_y: number
+  thickness_z: number
+  confidence: number
+}
+
+export interface OuterProfile {
+  type: 'rectangle' | 'rounded_rectangle' | 'polygon'
+  corner_radius: number
+  points_2d?: XY[] | null
+  confidence: number
+}
+
+export type EdgeTarget = 'top_outer_edges' | 'bottom_outer_edges' | 'vertical_outer_edges' | 'all_outer_edges'
+export const EDGE_TARGETS: EdgeTarget[] = ['top_outer_edges', 'bottom_outer_edges', 'vertical_outer_edges', 'all_outer_edges']
+
+export interface EdgeTreatment {
+  id: string
+  type: 'chamfer' | 'fillet'
+  size: number
+  target: EdgeTarget
+  confidence: number
+}
+
+export interface LinearPattern {
+  type: 'linear'
+  count_x: number
+  count_y: number
+  pitch_x: number
+  pitch_y: number
+}
+
+export interface CircularPattern {
+  type: 'circular'
+  radius: number
+  count: number
+  start_angle_deg: number
+  sweep_deg: number
+}
+
+export type Pattern = LinearPattern | CircularPattern
+
+interface FeatureBase {
+  id: string
+  face: Face
+  confidence: number
+  source_note?: string | null
+}
+
+interface Positioned extends FeatureBase {
+  center_x: number
+  center_y: number
+  pattern?: Pattern | null
+  extra_positions?: XY[]
+}
+
+interface Cut {
+  depth?: number | null
+  through_all: boolean
+}
+
+export interface Hole extends Positioned, Cut {
+  type: 'hole'
+  diameter: number
+  thread?: string | null
+  thread_depth?: number | null
+  counterbore?: { diameter: number; depth: number } | null
+  countersink?: { diameter: number; angle_deg: number } | null
+  tolerance?: string | null
+  tip_angle_deg?: number | null
+}
+
+export interface PocketRect extends Positioned, Cut {
+  type: 'pocket_rect'
+  length_x: number
+  width_y: number
+  corner_radius: number
+  rotation_deg: number
+}
+
+export interface PocketCircle extends Positioned, Cut {
+  type: 'pocket_circle'
+  diameter: number
+}
+
+export interface PocketPolygon extends FeatureBase, Cut {
+  type: 'pocket_polygon'
+  points_2d: XY[]
+  corner_radius: number
+}
+
+export interface Slot extends FeatureBase, Cut {
+  type: 'slot'
+  start_x: number
+  start_y: number
+  end_x: number
+  end_y: number
+  width: number
+}
+
+export interface BossRect extends Positioned {
+  type: 'boss_rect'
+  length_x: number
+  width_y: number
+  height: number
+  corner_radius: number
+  rotation_deg: number
+}
+
+export interface BossCircle extends Positioned {
+  type: 'boss_circle'
+  diameter: number
+  height: number
+}
+
+export interface StepCut extends FeatureBase {
+  type: 'step_cut'
+  x_min: number
+  x_max: number
+  y_min: number
+  y_max: number
+  depth: number
+  corner_radius: number
+}
+
+export interface Complex3D extends FeatureBase {
+  type: 'complex_3d'
+  description: string
+  operation: 'cut' | 'union'
+  bbox_min?: [number, number, number] | null
+  bbox_max?: [number, number, number] | null
+  code?: string | null
+}
+
+export type Feature =
+  | Hole
+  | PocketRect
+  | PocketCircle
+  | PocketPolygon
+  | Slot
+  | BossRect
+  | BossCircle
+  | StepCut
+  | Complex3D
+
+export type FeatureType = Feature['type']
+
+export interface PartSpec {
+  schema_version: '1.0'
+  part_name?: string | null
+  units: 'mm'
+  material?: string | null
+  general_tolerance?: string | null
+  datum_origin: DatumOrigin
+  stock: Stock
+  outer_profile: OuterProfile
+  features: Feature[]
+  edge_treatments: EdgeTreatment[]
+  requires_complex_3d_fallback: boolean
+  ambiguities: string[]
+}
+
+// ---- DFM report (§8) ------------------------------------------------------------
+
+export type Severity = 'info' | 'warning' | 'error'
+
+export interface DFMIssue {
+  code: string
+  severity: Severity
+  message: string
+  feature_id?: string | null
+  suggestion?: string | null
+}
+
+export interface GeometryCheck {
+  is_valid: boolean
+  solid_count: number
+  volume_mm3: number
+  bbox_min_mm: [number, number, number]
+  bbox_max_mm: [number, number, number]
+  expected_size_mm: [number, number, number]
+  bbox_matches_spec: boolean
+  bbox_deviation_mm: number
+}
+
+export interface FeatureBuildStatus {
+  feature_id: string
+  ok: boolean
+  method: 'deterministic' | 'llm_sandbox' | 'skipped'
+  error?: string | null
+}
+
+export interface DFMReport {
+  spec_version: number
+  passed: boolean
+  geometry?: GeometryCheck | null
+  issues: DFMIssue[]
+  feature_status: FeatureBuildStatus[]
+  review_items: string[]
+  colored_faces: Record<string, number>
+  stats: Record<string, number>
+}
+
+// ---- Jobs (§7) --------------------------------------------------------------------
+
+export type JobStatus =
+  | 'queued'
+  | 'parsing_pdf'
+  | 'extracting_features'
+  | 'compiling_cad'
+  | 'verifying'
+  | 'retrying'
+  | 'ready'
+  | 'failed'
+export const TERMINAL: JobStatus[] = ['ready', 'failed']
+
+export interface JobSummary {
+  job_id: string
+  status: JobStatus
+  filename: string
+  created_at: number
+  updated_at: number
+  progress: number
+  message?: string | null
+  current_version: number
+  error?: string | null
+  running: boolean
+  dfm: { passed: boolean; errors: number; warnings: number; needs_review: boolean; ambiguities: number } | null
+}
+
+export interface SpecVersion {
+  version: number
+  source: 'extraction' | 'reextract' | 'self_heal' | 'critic' | 'complex_code' | 'user_edit'
+  reason: string
+  created_at: number
+}
+
+export interface CriticReport {
+  verdict: 'match' | 'mismatch' | 'skipped'
+  discrepancies: { feature_id?: string | null; issue: string; suggested_fix?: string | null }[]
+}
+
+export interface IterationLog {
+  ts: number
+  iteration: number | 'operator'
+  version: number
+  gate_passed: boolean
+  errors: string[]
+  action?: string | null
+  critic?: CriticReport | null
+  duration_s?: number
+}
+
+export interface JobDetail extends JobSummary {
+  version: number
+  versions: SpecVersion[]
+  part_spec: PartSpec | null
+  dfm_report: DFMReport | null
+  iteration_logs: IterationLog[]
+  critic: CriticReport | null
+  artifacts: Record<string, string> & { tiles?: Record<string, string> }
+  duration_s?: number
+}
+
+export interface PipelineEvent {
+  id: number
+  job_id: string
+  ts: number
+  stage: string
+  level: 'info' | 'warning' | 'error'
+  message: string
+  progress: number | null
+  data: Record<string, unknown> | null
+}
+
+export function needsReview(confidence: number): boolean {
+  return confidence < REVIEW_CONFIDENCE_THRESHOLD
+}

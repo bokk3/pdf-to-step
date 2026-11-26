@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "part_name": "Montageplaat_A12",
+  "units": "mm",
+  "material": "AlMgSi1 (6082-T6)",
+  "general_tolerance": "ISO 2768-mK",
+  "datum_origin": "bottom_left_top_face",
+  "stock": {
+    "length_x": 200.0,
+    "width_y": 100.0,
+    "thickness_z": 20.0,
+    "confidence": 0.98
+  },
+  "outer_profile": {
+    "type": "rounded_rectangle",
+    "corner_radius": 5.0,
+    "points_2d": null,
+    "confidence": 0.95
+  },
+  "features": [
+    {
+      "id": "feat_pocket_1",
+      "type": "pocket_rect",
+      "face": "top",
+      "center_x": 100.0,
+      "center_y": 50.0,
+      "length_x": 120.0,
+      "width_y": 60.0,
+      "depth": 8.0,
+      "corner_radius": 6.0,
+      "confidence": 0.92,
+      "source_note": "Top view central pocket"
+    },
+    {
+      "id": "feat_hole_1",
+      "type": "hole",
+      "face": "top",
+      "center_x": 15.0,
+      "center_y": 15.0,
+      "diameter": 8.0,
+      "depth": null,
+      "through_all": true,
+      "thread": "M8",
+      "counterbore": null,
+      "tolerance": "H7",
+      "confidence": 0.78,
+      "source_note": "4x Ø8 callout slightly blurred"
+    }
+  ],
+  "edge_treatments": [
+    {
+      "id": "edge_1",
+      "type": "chamfer",
+      "size": 1.0,
+      "target": "top_outer_edges",
+      "confidence": 0.9
+    }
+  ],
+  "requires_complex_3d_fallback": false,
+  "ambiguities": [
+    "Verify whether the 4 corner holes are through-holes or 15mm blind."
+  ]
+}

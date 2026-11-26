@@ -1,0 +1,408 @@
+# PDF-to-STEP CNC Generator — Architecture & Agent Specification
+
+## 1. Mission & Non-Negotiable Principles
+Build a local-first web application behind a **Tailscale VPN** that converts 2D technical PDF drawings into CNC-ready **B-Rep STEP files** (`.step`, ISO 10303 AP214/AP242) with minimal human rework.
+
+### Hard Rules for All Agents
+1. **No Mesh-to-STEP Shortcuts:** All 3D geometry MUST be native B-Rep built with `build123d` (Open CASCADE / OCCT). Never use mesh-based libraries (OpenSCAD, JSCAD, Three.js geometry) to export STEP files; CAM software requires exact analytical surfaces (arcs, cylinders, planes).
+2. **Schema-First Architecture:** Never pass raw LLM text directly between modules. All extraction, UI editing, and CAD compilation steps communicate strictly via the versioned Pydantic v2 schema `PartSpec` (`backend/app/schemas/part_spec.py`).
+3. **Deterministic First, LLM Second:** Standard 2.5D prismatic milling features (~90% of CNC shop parts) MUST be compiled by deterministic Python code to eliminate code hallucinations. LLM-generated `build123d` code is strictly a fallback for `complex_3d` features and MUST execute inside an isolated subprocess sandbox with a 15-second timeout.
+4. **Local-Only Binding:** Bind the Python server exclusively to `127.0.0.1:8000`. All remote access happens solely through `tailscale serve`. Never expose `DEEPSEEK_API_KEY` to the browser.
+5. **Full Job Traceability:** Every job stores its original PDF, extracted vector/text dump, high-res image tiles, `PartSpec` revisions, generated `.step`, preview `.glb`, 4-view orthographic verification PNGs, and DFM report under `data/jobs/<job_id>/`.
+
+---
+
+## 2. The 6-Step High-Reliability Pipeline
+
+To maximize accuracy on real CNC drawings, AI never blindly guesses CAD code directly from a full-page PDF image. Instead, every uploaded PDF moves through six controlled stages:
+
+### Stage 1 — PDF Preprocessing & Vector Extraction (`PyMuPDF` / `fitz`)
+* **Deterministic extraction:** Parse all embedded PDF vectors (lines, circles, arcs) and text blocks with exact `(x, y)` bounding-box coordinates.
+* **High-resolution rendering & tiling:** Render the full drawing at 300 DPI **and** slice automatic high-res overlapping crops (4–6 quadrant/view tiles + a dedicated title-block crop). This prevents tiny callouts such as `Ø6.5 H7` from becoming unreadable when the vision model downscales large sheets.
+
+### Stage 2 — Feature Extraction to Strict JSON (`deepseek-flash`)
+* Send the full-sheet overview, high-res tiles, and PyMuPDF-extracted text spans to `deepseek-flash` with Thinking Mode and structured JSON output enabled.
+* The model does **not** write CAD code here. It populates the strict `PartSpec` JSON schema (stock dimensions, datum origin, outer profile, pockets, holes, threads, tolerances) and assigns a `confidence` score (`0.0–1.0`) to every dimension and feature.
+
+### Stage 3 — Hybrid 3D Generation to STEP & GLB (`build123d` / OCCT)
+* **Layer 1 (Deterministic Compiler — ~90% of milling work):** Fixed Python code translates standard 2.5D features (outer profile, pockets, through/blind/counterbored holes, slots, bosses, shoulders, chamfers, fillets) directly into `build123d` operations. Zero hallucination risk.
+* **Layer 2 (AI Code Fallback — Complex 3D):** Triggered only when `requires_complex_3d_fallback` is `true` (e.g., lofts, angled compound planes, freeform surfaces). `deepseek-v4-pro` generates a `build123d` script from the `PartSpec` JSON and executes it in an isolated subprocess sandbox (`cad_sandbox.py`).
+* Exports both a CNC-ready `.step` file and a lightweight `.glb` mesh for browser inspection.
+
+### Stage 4 — Geometry & CNC-DFM Validation (`verifier.py`)
+* Runs automated gatekeeper checks before any file is marked ready: manifold solid check (`is_valid`), single-solid verification, bounding-box dimensional accuracy (`±0.01 mm`), minimum internal pocket corner radii, depth-to-diameter ratios, and thin-wall checks.
+* Renders 4 orthographic verification views (Top, Front, Right, Isometric) as a composite PNG (`ortho_check.png`).
+
+### Stage 5 — Self-Healing Visual Verification Loop (Max 3 Iterations)
+* Sends the rendered orthographic PNGs alongside the original PDF reference to `deepseek-flash` acting as a visual critic.
+* If OCCT raises a kernel error or the critic spots missing features / mismatched geometry, the structured error log and visual discrepancy report are routed back to Stage 2 (to correct `PartSpec`) or Stage 3 (to repair fallback code) for up to 3 automatic retries.
+
+### Stage 6 — Operator Verification & Instant Rebuild (Browser UI)
+* Displays a split-screen workstation view over Tailscale: original PDF on the left, interactive Three.js 3D `.glb` viewer on the right, and an editable `PartSpec` table underneath.
+* Any dimension with `confidence < 0.85` is highlighted in amber alongside DFM warnings.
+* Editing a value in the UI sends `PATCH /api/jobs/{job_id}/spec` and triggers an immediate deterministic CAD rebuild in under 1 second—without making a new AI API call.
+
+---
+
+## 3. Network Architecture Behind Tailscale VPN
+
+Run both backend and frontend on the local workstation using a **single-origin reverse proxy via `tailscale serve`**:
+
+```text
+[Authorized Workshop PC / Tablet on Tailnet]
+                    │
+         HTTPS (Automatic Tailscale TLS)
+   https://<workstation>.<tailnet>.ts.net
+                    │
+            tailscale serve --bg 8000
+                    │
+        [FastAPI Server — 127.0.0.1:8000]
+         ├── /api/*        -> REST & SSE Pipeline Endpoints
+         └── /*            -> Built React Frontend (/frontend/dist)
+                    │
+         [Local Processing + Outbound HTTPS]
+         ├── build123d / OCCT (Local CPU)
+         ├── SQLite + data/jobs/ (Local Disk)
+         └── DeepSeek API (Key stored strictly in server .env)
+```
+
+* **Zero open router ports & zero CORS friction:** FastAPI serves both the API and the compiled static frontend on `127.0.0.1:8000`.
+* **One-command HTTPS exposure:**
+  ```bash
+  tailscale serve --bg 8000
+  ```
+* **Access control:** Restrict access via Tailscale ACLs (e.g., `tag:cnc-workstation` accessible only to `group:werkplaats`).
+* **Local development workflow:** Run Vite on port `5173` with a dev proxy forwarding `/api` requests to `http://127.0.0.1:8000` for hot module replacement. In production, serve `/frontend/dist` directly from FastAPI.
+
+---
+
+## 4. Tech Stack & DeepSeek API Policy
+
+| Layer | Technology | Rationale |
+|---|---|---|
+| **Backend API** | Python 3.12, FastAPI, Uvicorn, Pydantic v2 | Native OCCT bindings, async SSE streaming, strict validation |
+| **Job Queue & State** | SQLite (`aiosqlite`) + `ProcessPoolExecutor` | Zero external infra (no Redis or Docker required on workstation) |
+| **PDF Parsing** | `PyMuPDF` (`fitz`) + `Pillow` | Fast vector/text coordinate extraction + 300 DPI tiling |
+| **CAD Kernel** | `build123d` (OCCT/OCP) + `trimesh` | Native B-Rep STEP export, bounding-box validation, GLB preview |
+| **AI Provider** | DeepSeek API (`openai` Python SDK, `base_url="https://api.deepseek.com"`) | Cost-effective multimodal vision + high-accuracy code reasoning |
+| **Frontend** | React 19, TypeScript, Vite, Tailwind CSS | Fast UI iteration, strict TypeScript mirror of `PartSpec` |
+| **3D & PDF Viewers** | `@react-three/fiber`, `@react-three/drei`, `pdfjs-dist` | Split-screen PDF inspection vs. orbitable 3D preview |
+| **Networking** | Tailscale (`tailscale serve --bg 8000`) | Zero-port-forwarding encrypted HTTPS access |
+
+### Critical DeepSeek API Integration Guidelines (For Agent 2)
+* **Model Routing (configure via `.env`):**
+  * `DEEPSEEK_VISION_MODEL=deepseek-flash` (powered by DeepSeek-V4.1-Flash): Use for **all vision tasks** (PDF extraction and visual verification). Supports native text + image inputs, thinking mode, and structured JSON output.
+  * `DEEPSEEK_CODE_MODEL=deepseek-v4-pro`: Use **exclusively for text-only complex 3D code fallback** (receives `PartSpec` JSON + kernel error logs; does not accept image inputs).
+  * *Do not hardcode legacy model IDs:* `deepseek-chat` and `deepseek-reasoner` are retired.
+* **SDK Compatibility:** Use the official OpenAI Python SDK configured with `base_url="https://api.deepseek.com"` and `api_key=settings.deepseek_api_key`.
+* **Image Resolution Limit Workaround (Mandatory Tiling):** Because the Vision API downscales large images to roughly a `1300 × 1300` pixel equivalent, **always** send:
+  1. The full sheet overview,
+  2. 4–6 overlapping high-res cropped tiles + a cropped title block, and
+  3. The raw PyMuPDF text + coordinate dump.
+  This combination is the single biggest driver of 95%+ dimensional accuracy on real CNC drawings.
+* **Files API Reuse:** During the multi-iteration visual verification loop (Stage 5), upload PDF page images once via the DeepSeek Files API and reference them by `file_id` rather than re-transmitting base64 payloads on every retry.
+
+---
+
+## 5. Repository Structure
+
+```text
+pdf-to-step/
+├── ARCHITECTURE.md                  # Source of truth for all agents
+├── .env.example                     # DEEPSEEK_API_KEY, model names, data dir
+├── scripts/
+│   ├── dev.sh                       # Starts FastAPI + Vite concurrently
+│   └── start_tailscale.sh           # Runs uvicorn on 127.0.0.1:8000 + tailscale serve
+├── backend/
+│   ├── pyproject.toml
+│   ├── app/
+│   │   ├── main.py                  # FastAPI app, static file serving, lifespan
+│   │   ├── config.py                # Pydantic Settings (.env loader)
+│   │   ├── db.py                    # SQLite job store (aiosqlite)
+│   │   ├── api/
+│   │   │   ├── jobs.py              # Upload, status, SSE stream, rebuild, download
+│   │   │   └── health.py            # Healthcheck + OCCT/DeepSeek connectivity check
+│   │   ├── schemas/
+│   │   │   └── part_spec.py         # Canonical PartSpec v1 + DFMReport models
+│   │   └── services/
+│   │       ├── pdf_parser.py        # PyMuPDF text/vector extraction + smart tiling
+│   │       ├── deepseek_client.py   # Vision extraction, visual critic, code fallback
+│   │       ├── cad_compiler.py      # Deterministic build123d 2.5D compiler
+│   │       ├── cad_sandbox.py       # Isolated subprocess executor (15s timeout)
+│   │       ├── verifier.py          # Solid checks, bbox check, DFM rules, ortho renders
+│   │       └── pipeline.py          # Orchestrator with max 3 self-healing retries
+│   └── tests/
+│       ├── fixtures/                # Real workshop PDFs + expected PartSpec JSONs
+│       ├── test_compiler.py         # Unit tests verifying STEP validity & ±0.01 mm dims
+│       └── test_dfm.py              # Unit tests for corner radius & DFM rules
+└── frontend/
+    ├── package.json
+    ├── vite.config.ts               # Proxy /api -> http://127.0.0.1:8000 in dev
+    └── src/
+        ├── types/partSpec.ts        # Strict TS mirror of backend PartSpec schema
+        ├── api/client.ts            # Fetch wrapper + EventSource SSE hook
+        └── components/
+            ├── UploadDropzone.tsx
+            ├── PipelineProgress.tsx
+            ├── PdfViewer.tsx        # Zoom/pan PDF sheet viewer
+            ├── Step3DViewer.tsx     # Three.js GLB viewer with grid, axes, wireframe
+            ├── FeatureEditor.tsx    # Editable table flagging confidence < 0.85
+            └── DfmWarningsPanel.tsx
+```
+
+---
+
+## 6. Canonical Data Contract (`PartSpec` v1)
+
+All backend and frontend agents MUST conform to this exact JSON structure. All dimensions are normalized to millimeters (`mm`) on ingestion.
+
+```json
+{
+  "schema_version": "1.0",
+  "part_name": "Montageplaat_A12",
+  "units": "mm",
+  "material": "AlMgSi1 (6082-T6)",
+  "general_tolerance": "ISO 2768-mK",
+  "datum_origin": "bottom_left_top_face",
+  "stock": {
+    "length_x": 200.0,
+    "width_y": 100.0,
+    "thickness_z": 20.0,
+    "confidence": 0.98
+  },
+  "outer_profile": {
+    "type": "rounded_rectangle",
+    "corner_radius": 5.0,
+    "points_2d": null,
+    "confidence": 0.95
+  },
+  "features": [
+    {
+      "id": "feat_pocket_1",
+      "type": "pocket_rect",
+      "face": "top",
+      "center_x": 100.0,
+      "center_y": 50.0,
+      "length_x": 120.0,
+      "width_y": 60.0,
+      "depth": 8.0,
+      "corner_radius": 6.0,
+      "confidence": 0.92,
+      "source_note": "Top view central pocket"
+    },
+    {
+      "id": "feat_hole_1",
+      "type": "hole",
+      "face": "top",
+      "center_x": 15.0,
+      "center_y": 15.0,
+      "diameter": 8.0,
+      "depth": null,
+      "through_all": true,
+      "thread": "M8",
+      "counterbore": null,
+      "tolerance": "H7",
+      "confidence": 0.78,
+      "source_note": "4x Ø8 callout slightly blurred"
+    }
+  ],
+  "edge_treatments": [
+    {
+      "id": "edge_1",
+      "type": "chamfer",
+      "size": 1.0,
+      "target": "top_outer_edges",
+      "confidence": 0.90
+    }
+  ],
+  "requires_complex_3d_fallback": false,
+  "ambiguities": [
+    "Verify whether the 4 corner holes are through-holes or 15mm blind."
+  ]
+}
+```
+
+### Supported Deterministic `features[].type` Values (v1)
+* `hole` — through, blind, counterbore, or countersink
+* `pocket_rect` — rounded rectangle pocket
+* `pocket_circle` — circular pocket
+* `pocket_polygon` — arbitrary 2D closed wire with optional corner fillets
+* `slot` — straight obround slot defined by start/end `(x, y)` and width
+* `boss_rect` / `boss_circle` — raised extrusion on a target face
+* `step_cut` — open edge cutout / shoulder
+
+---
+
+## 7. REST & SSE Streaming API Contract
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/jobs` | Multipart upload of PDF (`file`). Returns `{"job_id": "...", "status": "queued"}` immediately (`HTTP 202`). |
+| `GET` | `/api/jobs` | List recent jobs with status, filename, timestamps, and DFM pass/fail summary. |
+| `GET` | `/api/jobs/{job_id}` | Full job state: status, `part_spec`, `dfm_report`, `iteration_logs`, and artifact URLs. |
+| `GET` | `/api/jobs/{job_id}/events` | Server-Sent Events (SSE) stream emitting live stage updates (`parsing_pdf`, `extracting_features`, `compiling_cad`, `verifying`, `retrying`, `ready`, `failed`). |
+| `PATCH` | `/api/jobs/{job_id}/spec` | Accepts updated `PartSpec` JSON from the frontend editor. Triggers immediate deterministic CAD rebuild (skips LLM) and returns updated artifacts + DFM report. |
+| `POST` | `/api/jobs/{job_id}/reextract` | Accepts optional user hint text (e.g., `"Diepte van de pocket is 12mm"`) to re-run DeepSeek extraction. |
+| `GET` | `/api/jobs/{job_id}/artifacts/{filename}` | Serves `model.step`, `preview.glb`, `original.pdf`, or `ortho_check.png`. |
+
+---
+
+## 8. CNC DFM & Validation Rules (`verifier.py`)
+
+Every generated `Part` MUST pass these automated checks before a job is marked `ready`:
+
+1. **Manifold Integrity:** `part.is_valid` is `True` and `len(part.solids()) == 1` (single watertight solid, no open shells or duplicate geometry).
+2. **Dimensional Integrity:** Bounding box `(dx, dy, dz)` matches `stock` dimensions within `±0.01 mm` (unless a `step_cut` intentionally reduces overall stock).
+3. **Internal Corner Radius Check (CNC Milling):** Emit a `WARNING` if any internal pocket has `corner_radius < 1.5 mm` or `0 mm` (sharp non-millable corner), suggesting a minimum endmill radius or dogbone relief.
+4. **Depth-to-Diameter Ratio:** Emit a `WARNING` if hole depth exceeds `5 × diameter` or pocket depth exceeds `4 × corner_radius`.
+5. **Thin Wall Detection:** Emit a `WARNING` if the distance between any feature boundary and the stock edge is under `1.5 mm`.
+6. **CAM Face Color Coding (Phase 2 — STEP AP214/XCAF):** Tag threaded cylindrical faces (e.g., Blue) and tight-tolerance `H7` bores (e.g., Red) in STEP XCAF metadata so CAM software (Fusion 360, Mastercam, HyperMILL, SolidCAM) and operators recognize them immediately.
+
+---
+
+## 9. Parallel Work Breakdown for Coding Agents
+
+Assign one agent per workstream below. Agents coordinate strictly through this `ARCHITECTURE.md` and the `PartSpec` schema:
+
+### Agent 1 — Core Backend, Persistence & Tailscale Deployment
+* **Scope:** `backend/app/main.py`, `config.py`, `db.py`, `api/jobs.py`, `api/health.py`, `schemas/part_spec.py`, `scripts/dev.sh`, `scripts/start_tailscale.sh`, `.env.example`.
+* **Definition of Done:** Uploading a PDF creates a job in SQLite, stores files under `data/jobs/<id>/`, streams mock SSE stage events, exposes all Section 7 endpoints, and serves `/frontend/dist` cleanly on `127.0.0.1:8000`.
+
+### Agent 2 — PDF Vector/Text Parser & DeepSeek Vision Extractor
+* **Scope:** `backend/app/services/pdf_parser.py`, `backend/app/services/deepseek_client.py`.
+* **Definition of Done:** Given a technical PDF, extracts text + bounding boxes + vector primitives and renders the full sheet plus 4–6 overlapping high-res tiles and a title-block crop. Calls `deepseek-flash` via the OpenAI SDK (`base_url="https://api.deepseek.com"`) and returns a Pydantic-validated `PartSpec` with zero schema errors. Implements the Files API reuse and visual critic prompt comparing original PDF sheets against `ortho_check.png`.
+
+### Agent 3 — Deterministic `build123d` Compiler, Sandbox & Verifier
+* **Scope:** `backend/app/services/cad_compiler.py`, `cad_sandbox.py`, `verifier.py`, `pipeline.py`, `backend/tests/*`.
+* **Definition of Done:** Compiles the Section 6 example `PartSpec` JSON into a valid `.step` and `.glb`, renders a 4-view `ortho_check.png`, passes all `pytest` dimensional assertions (`±0.01 mm`), enforces the 15s subprocess timeout for `cad_sandbox.py`, and triggers DFM warnings on sharp internal pocket corners.
+
+### Agent 4 — React + TypeScript + Three.js Frontend
+* **Scope:** `frontend/*`.
+* **Definition of Done:** Responsive split-screen workstation UI featuring PDF drag-and-drop upload, live SSE pipeline progress stepper, side-by-side PDF viewer (`pdfjs-dist`) and orbitable Three.js `.glb` viewer (`@react-three/fiber`), interactive `PartSpec` editor highlighting `confidence < 0.85` in amber, instant `"Herbereken STEP"` button (`PATCH /spec`), DFM warning badges, and one-click `.step` download.
+
+---
+
+## 10. Recommended Build Order & Milestones
+
+1. **Milestone 1 — Foundation (Agent 3 + Agent 1):** Finalize `part_spec.py` and build the deterministic `build123d` compiler tested against 3 real example JSONs from your workshop. Import the resulting `.step` files into your CAM software to verify clean B-Rep geometry before introducing any AI.
+2. **Milestone 2 — Extraction Accuracy (Agent 2):** Collect 5–10 representative workshop PDF drawings in `backend/tests/fixtures/` as a regression benchmark. Tune PDF tiling overlap, vector/text prompt injection, and `deepseek-flash` prompts until extraction accuracy consistently clears your threshold.
+3. **Milestone 3 — UI & Tailscale Rollout (Agent 4 + Ops):** Build the frontend against mock endpoints in parallel, wire up SSE + `PATCH /spec` instant rebuilds, and deploy behind `tailscale serve --bg 8000` with workshop ACLs enabled.
+
+---
+
+## 11. Implementation Notes (as built, 2026-11-26)
+
+Everything above is the contract. This section records the decisions taken while implementing it, so later
+agents do not have to rediscover them.
+
+### 11.1 Coordinates & PartSpec extensions
+* `datum_origin` places the part: the default `bottom_left_top_face` gives x∈[0,L], y∈[0,W], **z∈[-T,0]**
+  (Z0 = top of stock). Also supported: `bottom_left_bottom_face`, `center_top_face`, `center_bottom_face`.
+* `center_x/center_y` (and `start_*`, `end_*`, `x_min..y_max`, `points_2d`) are datum coordinates projected on the
+  feature's face, never mirrored: top/bottom → (X, Y); front/back → (X, Z); left/right → (Y, Z).
+  Example: M6 in the front face of a 12 mm plate at mid-height → `face: "front", center_y: -6`.
+* `depth: null` ⇒ `through_all: true`. `units` is always `"mm"` (inch drawings are converted by the extractor).
+* Optional fields beyond the §6 example (all backwards compatible): `pattern` (`linear` grid from the first
+  instance, or `circular` around the centre), `extra_positions`, `countersink {diameter, angle_deg}`,
+  `thread_depth`, `tip_angle_deg` (118° drill point on blind holes, `null` = flat), `rotation_deg`,
+  `step_cut {x_min, x_max, y_min, y_max, depth, corner_radius}` and a `complex_3d` feature (`description`,
+  `operation`, `bbox_min/max`, `code`) that carries the Layer-2 work. `requires_complex_3d_fallback` is set
+  automatically when a `complex_3d` feature exists; the compiler skips such features unless the flag is true.
+* Threads: `diameter` is the nominal size; the solid is modelled at the ISO tap drill (M8 → 6.8, fine threads
+  nominal − pitch). Edge treatments are applied to the stock before features (fillets before chamfers).
+
+### 11.2 Pipeline & statuses
+* Job status = the §7 stage name: `queued → parsing_pdf → extracting_features → compiling_cad → verifying →
+  retrying → ready | failed`. `ready` means the §8.1/8.2 gate passed and every feature compiled; DFM warnings
+  never block. `GET /api/jobs` exposes `dfm.needs_review` (low confidence, warnings or ambiguities).
+* Stage 5 routing: kernel/gate failures → `correct_spec` on `DEEPSEEK_VISION_MODEL` **with the drawing**
+  (Stage 2); `complex_3d` sandbox failures → `DEEPSEEK_CODE_MODEL` regenerates the code (Stage 3). Max 1 + 3
+  builds. The critic must quote text-layer **evidence** and mark findings `major|minor`; only evidence-backed
+  major findings trigger a correction, and the correction prompt must verify every claim against the drawing.
+  The job ends on the last critic-approved build (prevents a hallucinated "fix" from replacing a good model).
+* Extra deterministic check (not in §8): every Ø / M / R callout in the text layer (outside the title block),
+  including `Nx` counts, must map to the PartSpec, otherwise `CALLOUT_UNMATCHED` (warning). These findings
+  are also handed to the critic.
+* `PATCH /spec` is synchronous in a pre-warmed process-pool worker: STEP + GLB + DFM in ≈1.0–1.2 s end-to-end
+  on the workstation (CAD ≈0.8–0.95 s). Ortho renders follow on a dedicated render worker and are announced
+  with a `verifying` SSE event. It never calls the LLM; a `complex_3d` feature without code is reported as a
+  failed feature (use `/reextract`).
+* `POST /reextract {hint}` re-runs Stage 2 with the current (possibly operator-corrected) spec plus the hint.
+* Extra endpoints: `GET /api/health[?deep=true]`, `GET /api/jobs/{id}?version=n`, `GET /api/jobs/{id}/spec?version=n`,
+  `GET /api/jobs/{id}/events/history`, `DELETE /api/jobs/{id}`, `GET /api/schema/part_spec`.
+  `GET /artifacts/{filename}` also accepts `?version=n`, `ortho_<view>.png` and `tiles/<name>.png`.
+
+### 11.3 DeepSeek specifics (verified against the live API, 2026-11-26)
+* Files API: upload with `purpose="user_data"` (`vision` is rejected) and reference in chat content as
+  `{"type": "file", "file_id": "<id>"}`. Ids are cached in `llm/file_ids.json`, reused for every retry and
+  the critic, and deleted from DeepSeek when the job is deleted. Base64 data URIs are the automatic fallback.
+* `deepseek-flash` reasons by default and reasoning tokens count against `max_tokens`: a 16k budget produced
+  empty completions (`finish_reason=length`). Default is 65 536 (auto-halved if rejected); empty completions
+  are retried. Thinking is passed as `extra_body={"thinking": {"type": "enabled"|"disabled"}}`.
+* Latency on the sample drawing: extraction ≈90–150 s with thinking, ≈6 s without (same geometry).
+  `DEEPSEEK_THINKING=disabled` is the fast option.
+
+### 11.4 Verifier
+* Gate: BRepCheck valid, exactly one solid, bounding box = stock (+ bosses) within ±0.01 mm; a `step_cut` may
+  shrink the envelope (info). Warnings use the §8 thresholds (configurable in `.env`, `DFM_*`).
+* §8.6 is implemented now: threaded bores blue, tight-tolerance bores (ISO fit IT≤9 such as H7, or a numeric
+  band ≤0.05 mm) red, written as XCAF surface colours in the STEP.
+* `ortho_check.png` = front / right / top / iso hidden-line views at one common scale (plus `ortho_<view>.png`).
+* The GLB is tessellated per B-Rep face (sharp CAD edges, smooth cylinders) and written Y-up (glTF); the viewer
+  rotates it back to Z-up.
+
+### 11.5 Sandbox
+AST allow-list (`build123d`, `math`, `numpy`; no dunders, no exec/eval/open/getattr, no exporters), separate
+`python -I` interpreter with a scrubbed environment, temporary cwd and restricted builtins; output crosses back
+only as a BREP file. The 15 s budget applies to the generated code itself — interpreter start + `import build123d`
+(≈10 s on this workstation) has its own 90 s limit. This is defence in depth, not a hard security boundary.
+
+### 11.6 Job folder
+```text
+data/jobs/<job_id>/
+├── original.pdf
+├── extraction/   text_spans.json, vectors.json, summary.json, all_pages_text.json, digest.json
+├── tiles/        sheet.png, tile_r{0,1}c{0,1}.png, title_block.png (+ *.llm.png sent to the model)
+├── specs/        part_spec_v<n>.json, history.json (source: extraction|reextract|self_heal|critic|complex_code|user_edit)
+├── versions/v<n>/ model.step, preview.glb, ortho_check.png, ortho_<view>.png, dfm_report.json, complex/
+├── model.step, preview.glb, ortho_check.png, dfm_report.json   (= current version)
+├── iteration_logs.json
+└── llm/          trace_*.json (every request/response + token usage), file_ids.json
+```
+
+### 11.7 Deployment notes (reference workstation: Windows 10, Tailscale)
+* **Fixed, dedicated ports** (deviation from the `8000` / `5173` / `--bg 8000` defaults in §1-§5, at the operator's
+  request, to never collide with other dev servers or the services already on this machine):
+
+  | What | Port | Notes |
+  |---|---|---|
+  | API + built UI (uvicorn) | `127.0.0.1:8620` | `PORT` in `.env`; still loopback-only (hard rule 4) |
+  | Vite dev server | `127.0.0.1:5620` | `VITE_DEV_PORT`; proxies `/api` to `PORT` |
+  | Tailnet HTTPS (`tailscale serve`) | `:8445` | `TAILSCALE_HTTPS_PORT`; 443 / 8443 / 10000 were already serving other tools on the reference workstation |
+
+  Checked free and outside the Windows dynamic range (49152+) and excluded ranges on 2026-11-26.
+  Without `.env` the code default stays `8000`.
+* **Service** (`scripts/service.ps1`, Windows, no admin): `ensure` starts the API when it is not healthy, verifies the
+  `tailscale serve` mapping (re-creates it when missing or when it still points to an old target of this service;
+  never overwrites a mapping that belongs to something else unless `-Force`) and tests
+  `https://<machine>.<tailnet>:8445/api/health` end-to-end (re-applies the mapping once on failure).
+  `install` registers the task "PDF-to-STEP service" (at sign-in + every 5 min, runs `ensure`), independent of any
+  other autostart on the machine. Also `status`, `stop`, `restart`, `uninstall`.
+  Logs: `logs/service.log`, `logs/api.{out,err}.log`. `scripts/start_tailscale.ps1` delegates to `service.ps1 ensure`.
+* Windows equivalents: `scripts/dev.ps1`, `scripts/start_tailscale.ps1`. If `PYTHONDONTWRITEBYTECODE` is set,
+  precompile the venv once (`python -m compileall .venv/Lib/site-packages`): PyMuPDF otherwise recompiles
+  ~4 MB of Python on every import.
+* The UI is Dutch for the workshop operators; code, prompts and API stay English.
+* Below 1024 px the UI switches to a mobile shell (`MobileShell.tsx`): compact top bar with STEP download,
+  job list as its own screen, and five full-height tabs (Status · Tekening · 3D · Spec · Controle) with badges.
+  Deep links: `#job=<id>&tab=<status|tekening|3d|spec|controle>`. On touch devices (`pointer: coarse`) every
+  button is ≥ 44 px and form fields use 16 px text (no iOS focus zoom); the drawing supports pinch-zoom. The app
+  ships a web manifest so it can be added to the home screen.
+
+### 11.8 Open items
+* Milestone 1: import the generated STEP files into the workshop CAM package (colours, faces, datum) and add 3
+  real workshop example JSONs to `backend/tests/fixtures/`.
+* Milestone 2: add 5–10 real workshop PDFs + expected `*.part_spec.json` as the extraction benchmark (the current
+  fixtures are a synthetic bracket and the §6 example).
+* Tailscale ACLs (`tag:cnc-workstation` → `group:werkplaats`) are a tailnet admin task.
+* Turned parts (cylindrical stock, lathe features) are outside the v1 contract.

@@ -1,0 +1,14 @@
+{
+  "name": "PDF → STEP CNC-generator",
+  "short_name": "PDF→STEP",
+  "description": "2D-werktekening naar CNC-klare STEP (build123d / OCCT)",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

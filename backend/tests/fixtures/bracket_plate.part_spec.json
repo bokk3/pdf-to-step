@@ -1,0 +1,140 @@
+{
+  "schema_version": "1.0",
+  "part_name": "BRK-120-A Mounting plate",
+  "units": "mm",
+  "material": "EN AW-6082 T6",
+  "general_tolerance": "ISO 2768-mK",
+  "datum_origin": "bottom_left_top_face",
+  "stock": {
+    "length_x": 120.0,
+    "width_y": 80.0,
+    "thickness_z": 12.0,
+    "confidence": 0.98
+  },
+  "outer_profile": {
+    "type": "rounded_rectangle",
+    "corner_radius": 6.0,
+    "confidence": 0.95
+  },
+  "features": [
+    {
+      "through_all": true,
+      "id": "H1",
+      "face": "top",
+      "confidence": 0.95,
+      "source_note": "4x Ø6.6 THRU, CBORE Ø11 DEPTH 6.8",
+      "center_x": 10.0,
+      "center_y": 10.0,
+      "pattern": {
+        "type": "linear",
+        "count_x": 2,
+        "count_y": 2,
+        "pitch_x": 100.0,
+        "pitch_y": 60.0
+      },
+      "extra_positions": [],
+      "type": "hole",
+      "diameter": 6.6,
+      "counterbore": {
+        "diameter": 11.0,
+        "depth": 6.8
+      },
+      "tip_angle_deg": 118.0
+    },
+    {
+      "depth": 6.0,
+      "through_all": false,
+      "id": "P1",
+      "face": "top",
+      "confidence": 0.93,
+      "source_note": "POCKET 50x30 R5 DEPTH 6",
+      "center_x": 60.0,
+      "center_y": 40.0,
+      "extra_positions": [],
+      "type": "pocket_rect",
+      "length_x": 50.0,
+      "width_y": 30.0,
+      "corner_radius": 5.0,
+      "rotation_deg": 0.0
+    },
+    {
+      "through_all": true,
+      "id": "H2",
+      "face": "top",
+      "confidence": 0.92,
+      "source_note": "Ø10 H7 (+0.015/0) THRU",
+      "center_x": 60.0,
+      "center_y": 40.0,
+      "extra_positions": [],
+      "type": "hole",
+      "diameter": 10.0,
+      "tolerance": "H7",
+      "tip_angle_deg": 118.0
+    },
+    {
+      "through_all": true,
+      "id": "K1",
+      "face": "top",
+      "confidence": 0.9,
+      "source_note": "Ø4.5 THRU, CSK Ø9 x 90°",
+      "center_x": 60.0,
+      "center_y": 12.0,
+      "extra_positions": [],
+      "type": "hole",
+      "diameter": 4.5,
+      "countersink": {
+        "diameter": 9.0,
+        "angle_deg": 90.0
+      },
+      "tip_angle_deg": 118.0
+    },
+    {
+      "depth": 4.0,
+      "through_all": false,
+      "id": "S1",
+      "face": "top",
+      "confidence": 0.9,
+      "source_note": "SLOT 8 WIDE, DEPTH 4, CENTRES 50",
+      "type": "slot",
+      "start_x": 35.0,
+      "start_y": 68.0,
+      "end_x": 85.0,
+      "end_y": 68.0,
+      "width": 8.0
+    },
+    {
+      "depth": 15.0,
+      "through_all": false,
+      "id": "T1",
+      "face": "front",
+      "confidence": 0.88,
+      "source_note": "2x M6x1 - 12 DEEP, DRILL Ø5 x 15",
+      "center_x": 30.0,
+      "center_y": -6.0,
+      "extra_positions": [
+        [
+          90.0,
+          -6.0
+        ]
+      ],
+      "type": "hole",
+      "diameter": 6.0,
+      "thread": "M6x1",
+      "thread_depth": 12.0,
+      "tip_angle_deg": 118.0
+    }
+  ],
+  "edge_treatments": [
+    {
+      "id": "E1",
+      "type": "chamfer",
+      "size": 1.0,
+      "target": "top_outer_edges",
+      "confidence": 0.9
+    }
+  ],
+  "requires_complex_3d_fallback": false,
+  "ambiguities": [
+    "Notitie: alle scherpe kanten breken 0.2 en clear anodiseren 15 µm (niet gemodelleerd)."
+  ]
+}

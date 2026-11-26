@@ -1,0 +1,40 @@
+[project]
+name = "pdf-to-step-backend"
+version = "1.0.0"
+description = "Local-first PDF drawing -> CNC-ready B-Rep STEP generator (FastAPI + build123d + DeepSeek)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "python-multipart>=0.0.9",
+    "aiosqlite>=0.20",
+    "pymupdf>=1.24",
+    "pillow>=10.4",
+    "build123d>=0.9",
+    "trimesh>=4.4",
+    "numpy>=1.26",
+    "matplotlib>=3.9",
+    "openai>=1.40",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
