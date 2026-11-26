@@ -55,6 +55,7 @@ ISO_SCALES: list[tuple[float, str]] = [(5, "5:1"), (2, "2:1"), (1, "1:1"), (0.5,
 MIN_GUTTER = 25.0  # mm around every view (spec §4.2)
 DIM_FIRST = 10.0  # first baseline 10 mm outside the contour
 DIM_STEP = 8.0  # parallel baselines staggered by 8 mm
+LINE_PITCH = 1.75  # multi-line callouts: baseline spacing in lettering heights
 VIEW_DEFS = {
     "front": ((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
     "top": ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
@@ -139,6 +140,7 @@ class Callout:
     radius: float  # feature radius (view mm) - leader starts on the outline
     lines: list[str]
     feature_id: str
+    alternates: list[tuple[float, float]] = field(default_factory=list)  # other instances the leader may use
 
 
 def _face_frames(spec: PartSpec):
@@ -249,10 +251,13 @@ def plan_dimensions(spec: PartSpec, font: DrawingFont, dec: str) -> tuple[list[D
         if lines and pts:
             anchor = _in_view(f.face, *pts[0]) if not isinstance(f, PocketPolygon) else _in_view(
                 f.face, sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+            alts = [_in_view(f.face, *p) for p in pts[1:]] if not isinstance(f, PocketPolygon) else []
             if isinstance(f, (PocketRect, BossRect)) and not f.rotation_deg:
-                anchor = (anchor[0] + f.length_x / 2 * (-1 if f.face in ("left", "right") else 1), anchor[1])
+                sgn = -1 if f.face in ("left", "right") else 1
+                anchor = (anchor[0] + f.length_x / 2 * sgn, anchor[1])
+                alts = [(a[0] + f.length_x / 2 * sgn, a[1]) for a in alts]
                 radius = 0.0
-            callouts.append(Callout(view, anchor, radius, lines, f.id))
+            callouts.append(Callout(view, anchor, radius, lines, f.id, alts))
         # depth reference dims in the front view for top/bottom-face pockets, slots and steps
         if f.face in ("top", "bottom") and isinstance(f, (PocketRect, PocketCircle, PocketPolygon, Slot, StepCut)) \
                 and not getattr(f, "through_all", False):
@@ -312,9 +317,23 @@ class Layout:
     scale_label: str
     placements: dict[str, Placement]
     fits: bool
+    feature_marks: dict[str, list[tuple[float, float, float]]] = field(default_factory=dict)  # view -> (u, v, r)
 
 
-def _gutters(dims: list[DimSpec]) -> dict[tuple[str, str], float]:
+EDGE_CLEAR = 6.0  # clearance around a view side that carries no dimensions (towards frame / notes)
+
+
+def _approx_text_w(text: str) -> float:
+    return 0.64 * TEXT_DIM * len(text)  # DejaVu Sans digits are 0.636 em
+
+
+def _gutters(dims: list[DimSpec], views: dict[str, ViewProjection] | None = None,
+             scale: float = 1.0) -> dict[tuple[str, str], float]:
+    """Room the baseline dimensions need on each side of each view (mm on the sheet).
+
+    Dimension text sits above horizontal lines and left of vertical ones, so only the outermost line on the
+    `above` / `left` sides carries its text outside the stack. Dimensions too short for their text put it
+    past their upper (vertical) or right (horizontal) end, which may stick out of the view's side."""
     count: dict[tuple[str, str], int] = {}
     for dm in dims:
         count[(dm.view, dm.side)] = count.get((dm.view, dm.side), 0) + 1
@@ -322,14 +341,25 @@ def _gutters(dims: list[DimSpec]) -> dict[tuple[str, str], float]:
     for view in ("front", "top", "left"):
         for side in ("below", "above", "left", "right"):
             n = count.get((view, side), 0)
-            need = DIM_FIRST + DIM_STEP * (n - 1) + TEXT_DIM + 4 if n else 0.0
-            out[(view, side)] = max(MIN_GUTTER, need)
+            text_out = TEXT_DIM + 1.5 if side in ("above", "left") else 1.5
+            out[(view, side)] = DIM_FIRST + DIM_STEP * (n - 1) + text_out + 2.0 if n else EDGE_CLEAR
+    if views is not None:
+        for dm in dims:
+            tw = _approx_text_w(dm.text)
+            if abs(dm.b - dm.a) * scale >= tw + 8:
+                continue
+            u0, v0, u1, v1 = views[dm.view].bbox
+            if dm.side in ("left", "right"):  # vertical: text above the upper end
+                key, inside = (dm.view, "above"), (v1 - max(dm.a, dm.b)) * scale
+            else:  # horizontal: text right of the right end
+                key, inside = (dm.view, "right"), (u1 - max(dm.a, dm.b)) * scale
+            out[key] = max(out[key], 6.0 + tw + 1.5 - inside)
     return out
 
 
 def solve_layout(views: dict[str, ViewProjection], dims: list[DimSpec], sheet_size: str, scale: float,
                  forbidden: Box, inner: Box) -> Layout:
-    g = _gutters(dims)
+    g = _gutters(dims, views, scale)
     f, t, lft = views["front"].bbox, views["top"].bbox, views["left"].bbox
     s = scale
     u_min = min(f[0], t[0])
@@ -337,8 +367,11 @@ def solve_layout(views: dict[str, ViewProjection], dims: list[DimSpec], sheet_si
     v_max = max(f[3], lft[3])
     oy_front = inner[1] + max(g[("front", "above")], g[("left", "above")]) + v_max * s
     front_bottom = oy_front - f[1] * s
-    oy_top = front_bottom + g[("front", "below")] + g[("top", "above")] + t[3] * s
-    ox_left = ox + max(f[2], t[2]) * s + g[("front", "right")] + g[("left", "left")] - lft[0] * s
+    # gap between two views: both views' dimension stacks, but never closer than MIN_GUTTER
+    gap_ft = max(MIN_GUTTER, g[("front", "below")] + g[("top", "above")])
+    gap_fl = max(MIN_GUTTER, g[("front", "right")] + g[("left", "left")])
+    oy_top = front_bottom + gap_ft + t[3] * s
+    ox_left = ox + max(f[2], t[2]) * s + gap_fl - lft[0] * s
 
     def build(dx: float, dy: float) -> tuple[dict[str, Placement], list[Box]]:
         pl = {
@@ -386,12 +419,17 @@ class DrawingResult:
 
 
 class _Obstacles:
+    """Boxes text may not overlap; the subset `texts` may not be crossed by leader lines either."""
+
     def __init__(self, inner: Box):
         self.boxes: list[Box] = []
+        self.texts: list[Box] = []
         self.inner = inner
 
-    def add(self, b: Box) -> None:
+    def add(self, b: Box, blocks_leaders: bool = False) -> None:
         self.boxes.append(b)
+        if blocks_leaders:
+            self.texts.append(b)
 
     def free(self, b: Box, pad: float = 0.8) -> bool:
         if not box_inside(b, (self.inner[0] + 1, self.inner[1] + 1, self.inner[2] - 1, self.inner[3] - 1)):
@@ -417,6 +455,7 @@ def _draw_hdim(sh: Sheet, obs: _Obstacles, xa: float, xb: float, line_y: float, 
     thin = sh.lines.thin
     for x, ey in ((xa, ext_ya), (xb, ext_yb)):
         sh.line((x, ey + sgn * 1.0), (x, line_y + sgn * 2.0), width=thin, layer="DIMENSIONS")
+        obs.add(_seg_box((x, ey + sgn * 1.0), (x, line_y + sgn * 2.0), 0.6))
     lo, hi = min(xa, xb), max(xa, xb)
     tw = sh.measure(text)
     if hi - lo >= 7.0:
@@ -431,7 +470,7 @@ def _draw_hdim(sh: Sheet, obs: _Obstacles, xa: float, xb: float, line_y: float, 
         box = sh.text(text, (lo + hi) / 2, line_y - 1.0, TEXT_DIM, "middle", layer="DIMENSIONS")
     else:
         box = sh.text(text, hi + 6, line_y - 1.0, TEXT_DIM, "start", layer="DIMENSIONS")
-    obs.add(box)
+    obs.add(box, blocks_leaders=True)
     obs.add(_seg_box((lo - 5, line_y), (hi + 5, line_y)))
 
 
@@ -441,6 +480,7 @@ def _draw_vdim(sh: Sheet, obs: _Obstacles, ya: float, yb: float, line_x: float, 
     thin = sh.lines.thin
     for y, ex in ((ya, ext_xa), (yb, ext_xb)):
         sh.line((ex + sgn * 1.0, y), (line_x + sgn * 2.0, y), width=thin, layer="DIMENSIONS")
+        obs.add(_seg_box((ex + sgn * 1.0, y), (line_x + sgn * 2.0, y), 0.6))
     lo, hi = min(ya, yb), max(ya, yb)
     tw = sh.measure(text)
     if hi - lo >= 7.0:
@@ -455,7 +495,7 @@ def _draw_vdim(sh: Sheet, obs: _Obstacles, ya: float, yb: float, line_x: float, 
         box = sh.text(text, line_x - 1.0, (lo + hi) / 2, TEXT_DIM, "middle", rotation=90, layer="DIMENSIONS")
     else:
         box = sh.text(text, line_x - 1.0, lo - 6, TEXT_DIM, "start", rotation=90, layer="DIMENSIONS")
-    obs.add(box)
+    obs.add(box, blocks_leaders=True)
     obs.add(_seg_box((line_x, lo - 5), (line_x, hi + 5)))
 
 
@@ -526,13 +566,37 @@ def _place_dims(sh: Sheet, obs: _Obstacles, dims: list[DimSpec], layout: Layout)
                 _draw_vdim(sh, obs, ya, yb, line_x, exa, exb, dm.text, side)
 
 
+def layout_feature_boxes(view: str, layout: Layout, exclude: tuple[float, float]) -> list[Box]:
+    """Sheet boxes of the other feature instances in a view (leaders should not run through them)."""
+    p = layout.placements[view]
+    out = []
+    for u, v, r in layout.feature_marks.get(view, []):
+        if abs(u - exclude[0]) < 1e-6 and abs(v - exclude[1]) < 1e-6:
+            continue
+        x, y = p.to_sheet(u, v)
+        rr = max(r * p.scale, 1.5)
+        out.append((x - rr, y - rr, x + rr, y + rr))
+    return out
+
+
 def _place_callout(sh: Sheet, obs: _Obstacles, c: Callout, layout: Layout) -> bool:
+    best = None
+    for anchor in [c.anchor] + c.alternates:  # any instance of the feature may carry the leader
+        cand = _best_leader(sh, obs, c, layout, anchor)
+        if cand is not None and (best is None or cand[0] < best[0]):
+            best = cand
+    if best is None:
+        return False
+    return _draw_leader(sh, obs, c, best)
+
+
+def _best_leader(sh: Sheet, obs: _Obstacles, c: Callout, layout: Layout, anchor: tuple[float, float]):
     p = layout.placements[c.view]
-    ax, ay = p.to_sheet(*c.anchor)
+    ax, ay = p.to_sheet(*anchor)
     r = c.radius * p.scale
     h = TEXT_DIM
     widths = [sh.measure(t, h) for t in c.lines]
-    block_w, block_h = max(widths), h * 1.6 * len(c.lines)
+    block_w, block_h = max(widths), h * LINE_PITCH * len(c.lines)
     x0, y0, x1, y1 = p.rect
     best = None
     for ang in (45, 135, -45, -135, 20, 160, -20, -160, 90, -90):
@@ -550,14 +614,20 @@ def _place_callout(sh: Sheet, obs: _Obstacles, c: Callout, layout: Layout) -> bo
             start = (ax + ux * r, ay + uy * r)
             if not obs.free(box):
                 continue
-            if any(_segment_hits_box(start, (ex, ey), o) for o in obs.boxes if o[2] - o[0] < 120 and o[3] - o[1] < 40):
+            if any(_segment_hits_box(start, (ex, ey), o) for o in obs.texts):
                 continue
-            score = dist + (0 if ang in (45, 135, -45, -135) else 6)
+            # penalise leaders that cross other features of the same view
+            crossings = sum(1 for o in layout_feature_boxes(c.view, layout, anchor) if _segment_hits_box(start, (ex, ey), o))
+            score = dist + (0 if ang in (45, 135, -45, -135) else 6) + 25 * crossings
             if best is None or score < best[0]:
                 best = (score, start, (ex, ey), right, tx0, box)
             break
-    if best is None:
-        return False
+    return best
+
+
+def _draw_leader(sh: Sheet, obs: _Obstacles, c: Callout, best) -> bool:
+    h = TEXT_DIM
+    block_h = h * LINE_PITCH * len(c.lines)
     _, start, (ex, ey), right, tx0, box = best
     thin = sh.lines.thin
     shoulder = (ex + 3, ey) if right else (ex - 3, ey)
@@ -566,8 +636,8 @@ def _place_callout(sh: Sheet, obs: _Obstacles, c: Callout, layout: Layout) -> bo
     sh.arrow(start, (ex, ey))
     top = ey - block_h / 2
     for i, t in enumerate(c.lines):
-        sh.text(t, tx0, top + h * 1.15 + i * h * 1.6, h, "start", layer="CALLOUTS")
-    obs.add(box)
+        sh.text(t, tx0, top + h * 1.2 + i * h * LINE_PITCH, h, "start", layer="CALLOUTS")
+    obs.add(box, blocks_leaders=True)
     obs.add(_seg_box(start, (ex, ey)))
     return True
 
@@ -618,7 +688,7 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
 
     notes = [f"1. GENERAL TOLERANCES {spec.general_tolerance or 'ISO 2768-mK'}",
              f"2. SURFACE FINISH {dm.surface_finish} UNLESS OTHERWISE STATED",
-             f"3. {dm.edge_break_note.upper()}",
+             f"3. {dm.edge_break_note}",
              f"4. DIMENSIONS IN mm. DATUM (0,0,0): {_datum_text(spec.datum_origin)}"]
     for et in spec.edge_treatments:
         notes.append(f"{len(notes) + 1}. {_edge_note(et, dec)}")
@@ -691,6 +761,9 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
         if et.target in ("top_outer_edges", "all_outer_edges"):
             label = f"{fmt(et.size, dec)}x45°" if et.type == "chamfer" else f"R{fmt(et.size, dec)}"
             extra.append(Callout("front", (x1, z1), 0.0, [label], et.id))
+    for c in callouts:
+        for a in [c.anchor] + c.alternates:
+            layout.feature_marks.setdefault(c.view, []).append((a[0], a[1], max(c.radius, 1.0)))
     balloons: list[str] = []
     for c in extra + callouts:
         if not _place_callout(sh, obs, c, layout):
@@ -739,15 +812,26 @@ def _place_iso(sh: Sheet, iso: ViewProjection, layout: Layout, obs: _Obstacles, 
         return None
     u0, v0, u1, v1 = iso.bbox
     w, h = u1 - u0, v1 - v0
-    fit = min((fx1 - fx0) / max(w, 1e-6), (fy1 - fy0) / max(h, 1e-6))
-    s = next((sv for sv, _ in ISO_SCALES if sv <= min(fit, layout.scale)), None)
-    if s is None or w * s < 20:
+    fit = min((fx1 - fx0) / max(w, 1e-6), (fy1 - fy0 - 8) / max(h, 1e-6))
+    p = None
+    for s in (sv for sv, _ in ISO_SCALES if sv <= min(fit, layout.scale)):  # largest free scale and position
+        if w * s < 20:
+            break
+        for ax, ay in ((0.5, 0.5), (1.0, 0.5), (1.0, 0.0), (1.0, 1.0), (0.5, 0.0), (0.5, 1.0), (0.0, 0.5)):
+            cx = fx0 + w * s / 2 + (fx1 - fx0 - w * s) * ax
+            cy = fy0 + h * s / 2 + (fy1 - fy0 - 8 - h * s) * ay
+            ox = cx - (u0 + u1) / 2 * s
+            oy = cy + (v0 + v1) / 2 * s
+            cand = Placement("iso", ox, oy, s, (ox + u0 * s, oy - v1 * s, ox + u1 * s, oy - v0 * s))
+            label_box = (cand.rect[0], cand.rect[3], cand.rect[2], cand.rect[3] + 8)
+            if obs.free(cand.rect, pad=1.5) and obs.free(label_box, pad=0.5):
+                p = cand
+                break
+        if p is not None:
+            break
+    if p is None:
         return None
-    ox = (fx0 + fx1) / 2 - (u0 + u1) / 2 * s
-    oy = (fy0 + fy1) / 2 + (v0 + v1) / 2 * s
-    p = Placement("iso", ox, oy, s, (ox + u0 * s, oy - v1 * s, ox + u1 * s, oy - v0 * s))
-    if not obs.free(p.rect, pad=0.5):
-        return None
+    s = p.scale
     for pl in iso.visible:
         sh.polyline([p.to_sheet(u, v) for u, v in pl], width=sh.lines.thick, layer="VISIBLE")
     label = "ISOMETRIC" + ("" if abs(s - layout.scale) < 1e-9 else f" ({next(lb for sv, lb in ISO_SCALES if sv == s)})")

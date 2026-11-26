@@ -138,8 +138,9 @@ def boxes_overlap(a: Box, b: Box, pad: float = 0.0) -> bool:
     return a[0] < b[2] + pad and b[0] < a[2] + pad and a[1] < b[3] + pad and b[1] < a[3] + pad
 
 
-def box_inside(a: Box, outer: Box) -> bool:
-    return a[0] >= outer[0] and a[1] >= outer[1] and a[2] <= outer[2] and a[3] <= outer[3]
+def box_inside(a: Box, outer: Box, eps: float = 1e-6) -> bool:
+    return (a[0] >= outer[0] - eps and a[1] >= outer[1] - eps
+            and a[2] <= outer[2] + eps and a[3] <= outer[3] + eps)
 
 
 class Sheet:
@@ -382,15 +383,15 @@ def title_block(sheet: Sheet, values: dict[str, str], language: str = "EN") -> N
                        layer="TITLEBLOCK")
             value = values.get(key, "")
             if key == "projection":
-                projection_symbol(sheet, x0 + cx0 + 6, (ry0 + ry1) / 2 + 1.2, 2.6)
+                projection_symbol(sheet, x0 + cx0 + 7, ry0 + 7.2, 2.1)
                 continue
-            if key == "title" and values.get("doc_type"):
-                sheet.text(values["doc_type"], x0 + cx0 + 1.5, ry1 - 1.5, TEXT_SMALL, layer="TITLEBLOCK")
+            if key == "title" and values.get("doc_type"):  # document type on the label line, right-aligned
+                sheet.text(values["doc_type"], x0 + cx1 - 1.5, ry0 + 3.4, 2.0, "end", layer="TITLEBLOCK")
             if value:
-                size = vsize
+                size = vsize if key != "title" else 4.5
                 while size > 1.8 and sheet.measure(value, size) > (cx1 - cx0) - 2.5:
                     size -= 0.25
-                sheet.text(value, x0 + cx0 + 1.5, ry1 - (4.5 if key == "title" else 2.0), size, layer="TITLEBLOCK")
+                sheet.text(value, x0 + cx0 + 1.5, ry0 + 10.8 if key == "title" else ry1 - 2.0, size, layer="TITLEBLOCK")
 
 
 def notes_block(sheet: Sheet, lines: list[str], bottom: float, right: float, width: float = TB_W,

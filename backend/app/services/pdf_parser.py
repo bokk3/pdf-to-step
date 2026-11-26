@@ -81,7 +81,8 @@ class ParsedPdf:
             f"PAGE {self.page_index + 1}/{self.page_count}  size={self.page_size_mm[0]:.0f}x{self.page_size_mm[1]:.0f}mm  "
             f"text_layer={'yes' if self.has_text_layer else 'NO (scanned?)'}"
         ]
-        spans = sorted(self.spans, key=lambda s: (round(s.bbox_mm[1] / 4), s.bbox_mm[0]))
+        spans = sorted((s for s in self.spans if "sheet_grid" not in s.tags),
+                       key=lambda s: (round(s.bbox_mm[1] / 4), s.bbox_mm[0]))
         for s in spans[:max_spans]:
             x0, y0, x1, y1 = s.bbox_mm
             tile = self._tile_for(((x0 + x1) / 2, (y0 + y1) / 2))
@@ -291,6 +292,18 @@ def _save_crop(sheet: Image.Image, name: str, rect_pt: tuple[float, float, float
     )
 
 
+GRID_LABEL = re.compile(r"^(?:[A-Z]|\d{1,2})$")
+
+
+def _tag_sheet_grid(spans: list[TextSpan], w_mm: float, h_mm: float, band: float = 16.0) -> None:
+    """ISO 5457 grid reference labels (1, 2, … / A, B, …) in the sheet margin are not dimensions."""
+    for s in spans:
+        x0, y0, x1, y1 = s.bbox_mm
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        if GRID_LABEL.match(s.text) and (cx < band or cy < band or cx > w_mm - band or cy > h_mm - band):
+            s.tags = ["sheet_grid"]
+
+
 def choose_page(doc: pymupdf.Document) -> int:
     """Pick the page with the most vector content (usually the part sheet)."""
     if doc.page_count == 1:
@@ -320,6 +333,7 @@ def parse_pdf(pdf_path: Path, job_dir: Path, dpi: int = 300, max_pixels: int = 1
         pw, ph = page.rect.width, page.rect.height
 
         spans = _extract_spans(page)
+        _tag_sheet_grid(spans, pw * PT_TO_MM, ph * PT_TO_MM)
         vectors, stats, circles, rects = _extract_vectors(page)
         title_pt = _detect_title_block(rects, pw, ph)
 
