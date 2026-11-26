@@ -505,14 +505,32 @@ data/jobs/<job_id>/
 * **Paper sketch** (`GET /api/templates/sketch-a4.pdf`, `POST /api/jobs/from-sketch`): A4 landscape template with
   ArUco `DICT_4X4_50` ids 0–3 (18 mm, 8 mm from the corners), first-angle view boxes, datum, title fields and a
   checklist. The ingestor applies EXIF orientation, finds all four markers (otherwise 422 before a job is made),
-  fits a homography on the 16 marker corners (RANSAC), warps to 5 px/mm and builds a grid-free scan (red channel
-  divided by the local paper white, threshold 0.62 — the cyan grid sits at ~0.72). The model gets the colour sheet
+  fits a homography on the 16 marker corners (RANSAC), warps to 5 px/mm and builds a grid-free scan (see below). The model gets the colour sheet
   and the four box crops with a sketch prompt (only written numbers count, never guess, missing values as
   blocking questions); every confidence is capped at 0.75. The visual critic is off for sketches (not to scale).
   The UI asks the questions in a dialog and rebuilds via `PATCH /spec`.
-* Not done yet: the DeepSeek Files API `text_recognition` / `rich_layout_recognition` comparison on 5 real
-  handwritten sketches (DRAWING_SPEC §7 phase 3). The benchmark already runs sketch photos as fixtures; it needs
-  the workshop's sketches.
+* Files API OCR experiment (DRAWING_SPEC §3 / §7 phase 3), verified on the live API 2026-11-26/27: the Files API
+  accepts exactly the purposes `user_data`, `text_recognition` and `rich_layout_recognition` and has no content
+  endpoint; a file uploaded with a recognition purpose and referenced in a chat reaches the model as its
+  recognised text (LaTeX-like, e.g. `120\times60 R6`). Recognition runs asynchronously: a reference within ~1 s of
+  the upload arrives empty, hence `SKETCH_OCR_WAIT_S` (3 s). `rich_layout_recognition` returned nothing for a PDF
+  page in the probe. `SKETCH_OCR` adds that text for the four crops next to the images ("the image wins").
+* Benchmark on 5 synthetic handwritten sketches (`tests/fixtures/sketches/`, Windows script fonts with jitter,
+  phone-photo distortion; no real pencil sketches available yet), thinking on, `deepseek-flash`:
+
+  | Scan / sketches | OCR off | `text_recognition` | `rich_layout_recognition` |
+  |---|---|---|---|
+  | first run (red-channel scan, one cramped sketch) | P/R 0.92, 4/5 built | P/R 1.0, 4/5 built | – |
+  | final (brightest-channel scan, cleaned sketches) | P/R 1.0, 5/5 built, 33 s | P/R 1.0, 5/5, 47 s | P/R 1.0, 5/5, 43 s |
+
+  The one cramped sketch made both variants **ask** for the unreadable width instead of guessing (the gate works).
+  Decision: OCR stays **off** by default; it helped only while the scan lost faint pencil, and costs 10–14 s per
+  sketch. Turn it on (`SKETCH_OCR=text_recognition`) for poor photos, and re-run
+  `roundtrip_bench --fixtures tests/fixtures/sketches --sketch-ocr off,text_recognition` once real workshop
+  sketches are added.
+* The scan for the crops uses the brightest colour channel divided by the local paper white (threshold 0.80):
+  the light-cyan grid is bright in green/blue (~0.93) and drops out, grey pencil is dark in every channel and stays,
+  even thin strokes.
 
 * **Live 2D preview** (phase 4, `SpecPreview2D.tsx`): the editor draws the draft PartSpec as a first-angle front +
   top view in the browser (no request), with the same pattern expansion as `positions()`; shapes select features.

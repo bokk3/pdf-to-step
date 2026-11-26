@@ -5,7 +5,7 @@ Each version has its own contract document; this file tracks what is built. Stat
 | Version | Contract | Theme | Status |
 |---|---|---|---|
 | v1.0 | [ARCHITECTURE.md](ARCHITECTURE.md) | PDF → PartSpec → native B-Rep STEP, DFM gate, self-healing, operator UI, Tailscale | ✅ |
-| v1.1 | [DRAWING_SPEC.md](DRAWING_SPEC.md) | EN ISO 2D drawings, round-trip benchmark, sketch / DXF / STEP intake | ✅ (one open experiment, see phase 3) |
+| v1.1 | [DRAWING_SPEC.md](DRAWING_SPEC.md) | EN ISO 2D drawings, round-trip benchmark, sketch / DXF / STEP intake | ✅ |
 | v1.5 | [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md) | CAM-ready packages: tool library DFM, XCAF colours, stock + setup sheet, QR shopfloor view, batch intake, telemetry | ⏳ after v1.1 |
 | v2.5 | – | self-learning loop on the operator-correction telemetry captured from v1.5 | ⏳ |
 
@@ -15,6 +15,10 @@ repository that file is `DRAWING_SPEC.md`.
 
 ## v1.1 — EN ISO drawings & intake fast paths (DRAWING_SPEC.md §7, strict phase order)
 
+- ✅ **Spec audit (2026-11-27)**: every DRAWING_SPEC requirement checked against the build; added the ISO
+  symbols ⌴ ⌵ in callouts, ≥ 2.5 mm lettering everywhere, EN ISO 6410 threads, the hatched section A–A (ISO 128-50),
+  hole / counterbore depths in the front view, GD&T + surface + extra notes, the `DrawingEngine` protocol and the OCR
+  experiment. Conscious deviations are listed in ARCHITECTURE §11.8.
 - ✅ **Phase 1 — EN ISO drawing generator.** `iso_template.py` + `drawing_engine.py`: first-angle front/top/left +
   isometric view from build123d HLR, baseline dimensions per view with collision avoidance, ISO callouts,
   EN ISO 5457 frame, EN ISO 7200 title block (EN or EN/NL), ISO 2768-mK / 13715 / 21920-1 notes, `DRAFT` until
@@ -31,8 +35,9 @@ repository that file is `DRAWING_SPEC.md`.
   sketch prompt, confidence ≤ 0.75, missing dimensions → `awaiting_dimensions`; `POST /api/jobs/from-sketch`),
   `dxf_parser.py` (layered DXF, zero AI; `from-dxf`), `step_ingestor.py` (direct B-Rep import, DFM, colours,
   drawing; `from-step`). UI: camera capture, "Download Schetssjabloon (A4)", `MissingDimensionsModal`.
-  Open: the Files API `text_recognition` comparison on 5 real handwritten sketches (needs the workshop's sketches;
-  the benchmark already accepts `X.jpg` + `X.part_spec.json` fixtures).
+  Files API `text_recognition` / `rich_layout_recognition`: verified, wired in (`SKETCH_OCR`), benchmarked on 5
+  synthetic handwritten sketches: no gain once the scan keeps faint pencil, so off by default (ARCHITECTURE §11.10).
+  To do with the workshop: re-run that comparison on real pencil sketches.
 - ✅ **Phase 4 (optional) — live 2D preview.** `SpecPreview2D.tsx`: first-angle front + top view of the PartSpec
   being edited, drawn client-side in datum mm (patterns expanded like the backend, hidden / bottom features dashed,
   low-confidence features amber, datum marked). Follows every keystroke; clicking a shape selects its feature.
