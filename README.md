@@ -6,8 +6,8 @@ a deterministic [build123d](https://github.com/gumyr/build123d) / Open CASCADE c
 exact analytic geometry; a verifier gates the result on geometry and manufacturability before it is marked ready.
 
 > **[ARCHITECTURE.md](ARCHITECTURE.md) is the source of truth** (contract, API, DFM rules). Section 11 records
-> how it was implemented. Later versions have their own contracts ([DRAWING_SPEC.md](DRAWING_SPEC.md),
-> [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md)); progress is tracked in [ROADMAP.md](ROADMAP.md).
+> how it was implemented. Later versions have their own contracts ([DRAWING_SPEC.md](DRAWING_SPEC.md) for v1.1,
+> [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md) for v1.5); progress is tracked in [ROADMAP.md](ROADMAP.md).
 
 ![pipeline](https://img.shields.io/badge/pipeline-PDF%20%E2%86%92%20PartSpec%20%E2%86%92%20B--Rep%20%E2%86%92%20STEP-0ea5e9)
 ![python](https://img.shields.io/badge/python-3.12-3776ab) ![react](https://img.shields.io/badge/react-19-61dafb)
@@ -31,8 +31,9 @@ exact analytic geometry; a verifier gates the result on geometry and manufactura
   orthographic check renders, DFM report, iteration log and full LLM trace under `data/jobs/<job_id>/`.
 - **CAM-friendly STEP**: threaded bores coloured blue, tight-tolerance bores (H7, …) red via XCAF.
 - **EN ISO 2D drawings**: first-angle views + isometric, baseline dimensions from the datum, ISO callouts,
-  EN ISO 5457 frame and 7200 title block (EN or EN/NL), ISO 2768-mK notes, stamped `DRAFT` until signed.
-  Vector PDF with selectable text, SVG and layered DXF, next to `model.step` for every revision.
+  EN ISO 5457 frame and 7200 title block (EN or EN/NL), general tolerance / edge-break / surface notes, stamped
+  `DRAFT` until signed. Vector PDF with selectable text, SVG and layered DXF, A4 or A3 at an ISO 5455 scale, next
+  to `model.step` for every revision.
 - **DFM checks**: sharp / small internal corners, hole and pocket depth ratios, thin walls / webs / floors,
   unmatched drawing callouts.
 - **Operator UI** (Dutch): split-screen workstation on desktop, tabbed mobile layout on phones, installable as a PWA.
@@ -113,14 +114,14 @@ no overlapping text, PDF/SVG/DXF content) and the full REST/SSE flow.
 
 ```text
 backend/app/
-  schemas/part_spec.py      PartSpec v1 + DFMReport (the contract)
+  schemas/part_spec.py      PartSpec v1.1 + DFMReport (the contract)
   services/pdf_parser.py    PyMuPDF extraction + tiling
   services/deepseek_client.py  extraction, critic, spec correction, complex-3D code, Files API reuse
   services/cad_compiler.py  deterministic build123d compiler + STEP/XCAF export
   services/cad_sandbox.py   subprocess sandbox for LLM-generated build123d code
   services/verifier.py      geometry gate, DFM rules, callout coverage, GLB + ortho renders
-  services/iso_template.py  EN ISO sheet model: frame, title block, line types → PDF / SVG / DXF
-  services/drawing_engine.py  HLR views, scale/sheet solver, dimensions, callouts, layout
+  services/iso_template.py  EN ISO sheet model (frame, title block, line types) → PDF / SVG / DXF
+  services/drawing_engine.py  HLR views, scale/sheet solver, baseline dimensions, callouts, notes
   services/pipeline.py      orchestrator (process pool, self-healing loop, PATCH rebuilds)
   api/                      REST + SSE endpoints
 backend/tests/              pytest suite + fixtures
@@ -138,7 +139,7 @@ scripts/                    service.ps1, start_tailscale.{sh,ps1}, dev.{sh,ps1}
 
 ## Status
 
-Working end to end on 2.5D prismatic milling parts, including EN ISO 2D drawings. In progress: v1.5 (workshop tool
-library DFM, stock advisor + setup sheet, QR-linked shopfloor view, multi-drawing batches). See [ROADMAP.md](ROADMAP.md).
+Working end to end on 2.5D prismatic milling parts, including EN ISO 2D drawings. Next (see [ROADMAP.md](ROADMAP.md)):
+the v1.1 round-trip extraction benchmark and paper-sketch / DXF / STEP intake, then the v1.5 CAM and shopfloor package.
 
 No license has been chosen yet; until then all rights are reserved by the author.
