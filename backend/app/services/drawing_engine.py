@@ -321,6 +321,7 @@ class Layout:
 
 
 EDGE_CLEAR = 6.0  # clearance around a view side that carries no dimensions (towards frame / notes)
+CENTER_MARK_CLEAR = 5.0  # ISO 5457 centring marks reach 5 mm into the drawing field
 
 
 def _approx_text_w(text: str) -> float:
@@ -706,8 +707,10 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
         probe = Sheet(size, font)
         nbox = _notes_box(probe, notes)
         forbidden = (min(probe.title_block[0], nbox[0]), nbox[1], probe.inner[2], probe.inner[3])
+        i0, i1, i2, i3 = probe.inner  # keep clear of the ISO 5457 centring marks (5 mm into the field)
+        inner = (i0 + CENTER_MARK_CLEAR, i1 + CENTER_MARK_CLEAR, i2 - CENTER_MARK_CLEAR, i3 - CENTER_MARK_CLEAR)
         for sval, slabel in scales:  # largest scale first
-            lay = solve_layout(views, dims, size, sval, forbidden, probe.inner)
+            lay = solve_layout(views, dims, size, sval, forbidden, inner)
             lay.scale_label = slabel
             if lay.fits or len(scales) == 1:
                 return lay, probe, forbidden

@@ -406,6 +406,8 @@ class DeepSeekClient:
         system = ("You are a senior CNC manufacturing engineer reading 2D technical drawings (ISO/ASME, often Dutch "
                   "or German). Convert the drawing into a PartSpec JSON object for a deterministic build123d CAD "
                   "compiler. You do NOT write CAD code.\n\n" + CONVENTIONS + self._schema_block())
+        if self.s.extraction_prompt_appendix:  # prompt A/B variants (roundtrip_bench --prompt-variant)
+            system += "\n\nADDITIONAL INSTRUCTIONS:\n" + self.s.extraction_prompt_appendix
 
         async def build():
             content = [{"type": "text", "text": self._drawing_intro(filename, text_digest, vector_digest)}]

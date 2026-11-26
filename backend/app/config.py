@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     step_face_colors: bool = Field(True, description="§8.6 colour threaded (blue) / H7 (red) bores via XCAF")
     drawing_enabled: bool = Field(True, description="EN ISO detail drawing (drawing.pdf/.svg/.dxf) per version")
     drawing_owner: str = Field("", description="title block 'owner' field (company name)")
+    extraction_prompt_appendix: str = Field("", description="extra extraction instructions (prompt A/B benchmarks)")
 
     # --- DFM thresholds (§8) ------------------------------------------------------
     dfm_bbox_tolerance_mm: float = 0.01
