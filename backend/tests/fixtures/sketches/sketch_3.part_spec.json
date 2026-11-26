@@ -1,0 +1,42 @@
+{
+ "schema_version": "1.1",
+ "input_source": "paper_sketch",
+ "part_name": "Flens F3",
+ "material": "AlMgSi1",
+ "general_tolerance": "ISO 2768-mK",
+ "stock": {
+  "length_x": 150,
+  "width_y": 100,
+  "thickness_z": 12
+ },
+ "outer_profile": {
+  "type": "rectangle"
+ },
+ "features": [
+  {
+   "id": "C1",
+   "type": "pocket_circle",
+   "face": "top",
+   "center_x": 75,
+   "center_y": 50,
+   "diameter": 40,
+   "depth": 8
+  },
+  {
+   "id": "H1",
+   "type": "hole",
+   "face": "top",
+   "center_x": 20,
+   "center_y": 50,
+   "diameter": 10,
+   "tolerance": "H7",
+   "through_all": true,
+   "extra_positions": [
+    [
+     130,
+     50
+    ]
+   ]
+  }
+ ]
+}

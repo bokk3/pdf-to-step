@@ -27,10 +27,11 @@ SHEETS: dict[str, tuple[float, float]] = {"A4_LANDSCAPE": (297.0, 210.0), "A3_LA
 MARGIN_LEFT = 20.0  # binding edge
 MARGIN = 10.0
 FRAME_WIDTH = 0.7
-TB_W, TB_H = 180.0, 36.0  # ISO 7200 title block
+TB_W, TB_H = 180.0, 40.0  # ISO 7200 title block (width fixed by the norm; rows 14 / 13 / 13 mm)
 
 TEXT_DIM = 3.5  # primary dimensions / callouts
 TEXT_SMALL = 2.5  # minimum on A4 (ISO 3098)
+TEXT_LABEL = 2.5  # title-block field names (spec §2: nothing below 2.5 mm)
 TEXT_TITLE = 5.0
 
 
@@ -89,9 +90,31 @@ class DrawingFont:
         return float(self._font.text_length(text, fontsize=self.em(h)))
 
 
+ISO_SYMBOLS = "⌴⌵↧Ø°"  # counterbore, countersink, depth, diameter, degree (DRAWING_SPEC §2 callouts)
+SYMBOL_FONT_CANDIDATES = (  # sans-serif fonts that also carry the ISO drawing symbols, embeddable in PDFs
+    Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "seguisym.ttf",  # Segoe UI Symbol (fsType 8)
+)
+
+
+def _covers(path: Path, chars: str) -> bool:
+    try:
+        from fontTools.ttLib import TTFont
+
+        cmap = TTFont(str(path), lazy=True).getBestCmap() or {}
+        return all(ord(c) in cmap for c in chars + "AZaz09.,")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@lru_cache(maxsize=1)
 def default_font_path() -> str:
+    """A sans-serif lettering font: one that also has ⌴ ⌵ ↧ when installed (so callouts use the real ISO symbols in
+    one selectable text run), otherwise DejaVu Sans from matplotlib (callouts then say CBORE / CSK)."""
     import matplotlib
 
+    for cand in SYMBOL_FONT_CANDIDATES:
+        if cand.is_file() and _covers(cand, ISO_SYMBOLS):
+            return str(cand)
     return str(Path(matplotlib.get_data_path()) / "fonts" / "ttf" / "DejaVuSans.ttf")
 
 
@@ -342,8 +365,9 @@ def projection_symbol(sheet: Sheet, x: float, y: float, h: float = 3.5) -> None:
     ccx = left + length + 1.2 * h + big / 2
     sheet.circle((ccx, cy), big / 2, width=sheet.lines.thick, layer="TITLEBLOCK")
     sheet.circle((ccx, cy), small / 2, width=sheet.lines.thick, layer="TITLEBLOCK")
-    sheet.line((left - 1.5, cy), (ccx + big / 2 + 1.5, cy), style="center", layer="TITLEBLOCK")
-    sheet.line((ccx, cy - big / 2 - 1.5), (ccx, cy + big / 2 + 1.5), style="center", layer="TITLEBLOCK")
+    ov = 0.5 * h  # centre-line overshoot
+    sheet.line((left - ov, cy), (ccx + big / 2 + ov, cy), style="center", layer="TITLEBLOCK")
+    sheet.line((ccx, cy - big / 2 - ov), (ccx, cy + big / 2 + ov), style="center", layer="TITLEBLOCK")
 
 
 TB_LABELS = {
@@ -361,16 +385,16 @@ def title_block(sheet: Sheet, values: dict[str, str], language: str = "EN") -> N
     x0, y0, x1, y1 = sheet.title_block
     t = sheet.lines.thick
     sheet.rect(sheet.title_block, width=t, layer="TITLEBLOCK")
-    rows = [y0, y0 + 14, y0 + 25, y1]
+    rows = [y0, y0 + 14, y0 + 27, y1]
     for y in rows[1:-1]:
         sheet.line((x0, y), (x1, y), width=sheet.lines.thin, layer="TITLEBLOCK")
     layout = [
         [("title", 0, 115, TEXT_TITLE), ("drawing_no", 115, 180, 4.5)],
         [("material", 0, 45, TEXT_SMALL + 0.5), ("gen_tol", 45, 80, TEXT_SMALL + 0.5), ("surface", 80, 112, TEXT_SMALL),
          ("scale", 112, 130, TEXT_DIM), ("projection", 130, 162, 0), ("rev", 162, 180, TEXT_DIM)],
-        [("drawn", 0, 26, TEXT_SMALL), ("checked", 26, 52, TEXT_SMALL), ("date", 52, 76, TEXT_SMALL),
-         ("units", 76, 94, TEXT_SMALL + 0.5), ("mass", 94, 116, TEXT_SMALL), ("status", 116, 146, TEXT_DIM),
-         ("sheet", 146, 162, TEXT_SMALL + 0.5), ("owner", 162, 180, TEXT_SMALL)],
+        [("drawn", 0, 23, TEXT_SMALL), ("checked", 23, 53, TEXT_SMALL), ("date", 53, 75, TEXT_SMALL),
+         ("units", 75, 92, TEXT_SMALL + 0.5), ("mass", 92, 112, TEXT_SMALL), ("status", 112, 138, TEXT_DIM),
+         ("sheet", 138, 154, TEXT_SMALL + 0.5), ("owner", 154, 180, TEXT_SMALL)],
     ]
     for r, cells in enumerate(layout):
         ry0, ry1 = rows[r], rows[r + 1]
@@ -378,20 +402,34 @@ def title_block(sheet: Sheet, values: dict[str, str], language: str = "EN") -> N
             if cx0 > 0:
                 sheet.line((x0 + cx0, ry0), (x0 + cx0, ry1), width=sheet.lines.thin, layer="TITLEBLOCK")
             en, nl = TB_LABELS[key]
-            label = f"{en} / {nl}" if language == "EN_NL" and en != nl else en
-            sheet.text(label, x0 + cx0 + 1.0, ry0 + 3.4, 1.8 if (cx1 - cx0) < 30 or language == "EN_NL" else 2.0,
-                       layer="TITLEBLOCK")
+            avail = (cx1 - cx0) - 2.0
+            label_lines = [en]
+            if language == "EN_NL" and en != nl:  # one line if it fits, else EN over NL
+                both = f"{en} / {nl}"
+                label_lines = [both] if sheet.measure(both, TEXT_LABEL) <= avail else [en, nl]
+            for i, ln in enumerate(label_lines):
+                sheet.text(ln, x0 + cx0 + 1.0, ry0 + 3.6 + i * (TEXT_LABEL + 0.9), TEXT_LABEL, layer="TITLEBLOCK")
             value = values.get(key, "")
             if key == "projection":
-                projection_symbol(sheet, x0 + cx0 + 7, ry0 + 7.2, 2.1)
+                projection_symbol(sheet, x0 + cx1 - 11.5, ry1 - 3.0, 1.8)  # right of the (two-line) label
                 continue
             if key == "title" and values.get("doc_type"):  # document type on the label line, right-aligned
-                sheet.text(values["doc_type"], x0 + cx1 - 1.5, ry0 + 3.4, 2.0, "end", layer="TITLEBLOCK")
+                sheet.text(values["doc_type"], x0 + cx1 - 1.5, ry0 + 3.6, TEXT_LABEL, "end", layer="TITLEBLOCK")
             if value:
-                size = vsize if key != "title" else 4.5
-                while size > 1.8 and sheet.measure(value, size) > (cx1 - cx0) - 2.5:
-                    size -= 0.25
-                sheet.text(value, x0 + cx0 + 1.5, ry0 + 10.8 if key == "title" else ry1 - 2.0, size, layer="TITLEBLOCK")
+                size = vsize if key != "title" else 4.2
+                room = (ry1 - 2.0) - (ry0 + 3.6 + (len(label_lines) - 1) * (TEXT_LABEL + 0.9) + 1.0)
+                size = max(TEXT_SMALL, min(size, room))
+                while size > TEXT_SMALL and sheet.measure(value, size) > avail - 0.5:
+                    size = max(TEXT_SMALL, size - 0.25)
+                lines = [value]
+                if sheet.measure(value, size) > avail - 0.5 and " " in value:  # never below 2.5 mm: wrap instead
+                    words = value.split(" ")
+                    cut = min(range(1, len(words)), key=lambda k: abs(sheet.measure(" ".join(words[:k]), size)
+                                                                     - sheet.measure(" ".join(words[k:]), size)))
+                    lines = [" ".join(words[:cut]), " ".join(words[cut:])]
+                base = ry0 + 11.5 if key == "title" else ry1 - (2.4 if r == 0 else 2.0)  # clear of the next row's labels
+                for i, ln in enumerate(lines):
+                    sheet.text(ln, x0 + cx0 + 1.5, base - (len(lines) - 1 - i) * (size + 0.7), size, layer="TITLEBLOCK")
 
 
 def notes_block(sheet: Sheet, lines: list[str], bottom: float, right: float, width: float = TB_W,

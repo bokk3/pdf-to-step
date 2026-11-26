@@ -71,14 +71,20 @@ def cad_warmup(render: bool = False) -> float:
 def render_drawing(shape, spec: PartSpec, vdir: Path, job_id: str, version: int, owner: str = "",
                    overrides: dict | None = None) -> dict[str, Any]:
     """EN ISO detail drawing (PDF/SVG/DXF) of one version; meta goes to drawing.json."""
-    from app.services.drawing_engine import generate_drawing
+    from app.services.drawing_engine import get_engine
+
+    from app.services.verifier import estimate_mass_g
 
     o = {k: v for k, v in (overrides or {}).items() if v not in (None, "", "AUTO")}
     t = time.monotonic()
-    res = generate_drawing(spec, shape, vdir, sheet_size=o.get("sheet_size"), scale=o.get("scale"),
-                           language=o.get("language"),
-                           drawing_number=spec.drawing_metadata.drawing_number or f"PTS-{job_id[:8].upper()}",
-                           owner=owner)
+    try:
+        mass = estimate_mass_g(spec, float(shape.volume))
+    except Exception:  # noqa: BLE001
+        mass = None
+    res = get_engine(o.get("engine")).render(
+        spec, shape, vdir, sheet_size=o.get("sheet_size"), scale=o.get("scale"), language=o.get("language"),
+        drawing_number=spec.drawing_metadata.drawing_number or f"PTS-{job_id[:8].upper()}", owner=owner, mass_g=mass,
+        section_view=o.get("section_view"))
     info = {"version": version, "sheet_size": res.sheet_size, "scale": res.scale, "warnings": res.warnings,
             "balloons": res.balloons, "overrides": o, "duration_s": round(time.monotonic() - t, 3)}
     (vdir / "drawing.json").write_text(json.dumps(info, indent=1), encoding="utf-8")

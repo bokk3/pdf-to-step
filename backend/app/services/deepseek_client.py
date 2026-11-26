@@ -17,6 +17,7 @@ URIs are the automatic fallback. Raw model text never leaves this module.
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import json
 import logging
@@ -67,6 +68,9 @@ PARTSPEC CONVENTIONS (mandatory):
   pocket_circle: diameter. pocket_polygon: points_2d. slot: start_x/start_y -> end_x/end_y = the CENTRES of the two end arcs + width.
   Slot dimensions that end on centre marks / the slot centre line are already arc centres: use them as they are
   (never subtract the radius). Only when a drawing gives the OVERALL slot length, centre distance = overall - width.
+- GD&T frames (EN ISO 1101) go to drawing_metadata.gdt (characteristic, tolerance_mm, diameter_zone, datums,
+  feature_id); a surface requirement on one feature (Ra) to drawing_metadata.surface_finishes; other drawing
+  notes worth keeping to drawing_metadata.notes. These never change the geometry.
   boss_rect / boss_circle: raised extrusion of height out of the face.
   step_cut: open edge cut-out / shoulder = box x_min..x_max, y_min..y_max (face coords, may extend past the
   stock edge) removed to depth.
@@ -207,7 +211,8 @@ _NULL_DROP = {"confidence", "rotation_deg", "corner_radius", "extra_positions", 
               "ambiguities", "outer_profile", "through_all", "face", "datum_origin", "units", "angle_deg",
               "requires_complex_3d_fallback", "operation", "schema_version", "input_source", "drawing_metadata",
               "missing_dimensions", "sheet_size", "scale", "language", "revision", "approval_status", "projection",
-              "surface_finish", "edge_break_note", "drawn_by", "checked_by", "blocking", "prompt_en"}
+              "surface_finish", "edge_break_note", "drawn_by", "checked_by", "blocking", "prompt_en", "gdt",
+              "surface_finishes", "notes", "datums", "diameter_zone", "note"}
 
 
 def _strip_nulls(obj: Any) -> Any:
@@ -304,19 +309,45 @@ class DeepSeekClient:
             cache_p.write_text(json.dumps(cache, indent=1), encoding="utf-8")
         return parts
 
+    async def _ocr_parts(self, images: list[ExtractionImage], purpose: str) -> list[dict]:
+        """DRAWING_SPEC §3 route A experiment: the Files API recognises text in files uploaded with purpose
+        ``text_recognition`` / ``rich_layout_recognition``; referenced in a chat, the model receives that text
+        instead of the image. Recognition runs asynchronously after the upload (verified: ~1-2 s)."""
+        if not images:
+            return []
+        cache_p = self._cache_path(images[0]).with_name(f"file_ids_{purpose}.json")
+        cache: dict[str, str] = json.loads(cache_p.read_text(encoding="utf-8")) if cache_p.exists() else {}
+        fresh = False
+        ids: list[tuple[ExtractionImage, str]] = []
+        for img in images:
+            key = f"{img.path.name}:{hashlib.sha1(img.path.read_bytes()).hexdigest()[:16]}"
+            if key not in cache:
+                with open(img.path, "rb") as fh:
+                    cache[key] = (await self.client.files.create(file=fh, purpose=purpose)).id
+                fresh = True
+            ids.append((img, cache[key]))
+        cache_p.parent.mkdir(parents=True, exist_ok=True)
+        cache_p.write_text(json.dumps(cache, indent=1), encoding="utf-8")
+        if fresh:
+            await asyncio.sleep(self.s.sketch_ocr_wait_s)
+        parts: list[dict] = []
+        for img, fid in ids:
+            parts.append({"type": "text", "text": f"--- recognised text ({purpose}) of {img.label}: auxiliary, may contain "
+                                                  "recognition errors; when it disagrees with the image, the image wins ---"})
+            parts.append({"type": "file", "file_id": fid})
+        return parts
+
     async def release_files(self, job_dir: Path) -> int:
-        """Delete this job's uploaded images from DeepSeek (called on job deletion)."""
-        p = job_dir / "llm" / "file_ids.json"
-        if not p.exists():
-            return 0
+        """Delete this job's uploaded files (images + OCR uploads) from DeepSeek (called on job deletion)."""
         n = 0
-        for fid in json.loads(p.read_text(encoding="utf-8")).values():
-            try:
-                await self.client.files.delete(fid)
-                n += 1
-            except Exception:  # noqa: BLE001
-                pass
-        p.unlink(missing_ok=True)
+        for p in sorted((job_dir / "llm").glob("file_ids*.json")):
+            for fid in json.loads(p.read_text(encoding="utf-8")).values():
+                try:
+                    await self.client.files.delete(fid)
+                    n += 1
+                except Exception:  # noqa: BLE001
+                    pass
+            p.unlink(missing_ok=True)
         return n
 
     # -- low level ------------------------------------------------------------
@@ -466,6 +497,11 @@ class DeepSeekClient:
             content = [{"type": "text", "text": f"Sketch file: {filename or '-'}. Images: the rectified sheet, then "
                                                 "crops of the front, side, top and title boxes (grid removed)."}]
             content += await self._image_parts(images)
+            if self.s.sketch_ocr != "off":
+                try:
+                    content += await self._ocr_parts(images[1:] or images, self.s.sketch_ocr)  # crops; not the sheet
+                except Exception as exc:  # noqa: BLE001 - OCR is auxiliary
+                    log.warning("sketch OCR (%s) unavailable: %s", self.s.sketch_ocr, exc)
             if hint:
                 content.append({"type": "text", "text": f"OPERATOR HINT (authoritative, may be Dutch): {hint}"})
             content.append({"type": "text", "text": "Return the PartSpec json now."})

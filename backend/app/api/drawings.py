@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from typing import Literal
+
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
-from app.api.jobs import MAX_UPLOAD_BYTES, _pipeline, _store
+from app.api.jobs import MAX_UPLOAD_BYTES, _artifact_urls, _pipeline, _require_job, _store
 
 router = APIRouter(prefix="/api", tags=["intake"])
 IMAGE_TYPES = {b"\xff\xd8\xff": ".jpg", b"\x89PNG": ".png", b"RIFF": ".webp"}
@@ -104,3 +107,43 @@ async def from_sketch(request: Request, file: UploadFile = File(...)) -> dict:
     _pipeline(request).start_sketch_job(job["id"], name, upload)
     return {"job_id": job["id"], "status": "queued", "filename": name}
 
+
+class DrawingRequest(BaseModel):
+    """DRAWING_SPEC §6: optional overrides; anything left out comes from part_spec.drawing_metadata."""
+    sheet_size: Literal["AUTO", "A4_LANDSCAPE", "A3_LANDSCAPE"] | None = None
+    scale: str | None = Field(None, pattern=r"^(AUTO|\d+(\.\d+)?:\d+(\.\d+)?)$")
+    language: Literal["EN", "EN_NL"] | None = None
+    section_view: Literal["AUTO", "NONE"] | None = None
+    engine: str = Field("builtin", description="drawing engine (see GET /api/drawing-engines)")
+    version: int | None = None
+
+
+@router.post("/jobs/{job_id}/drawing")
+async def generate_drawing(request: Request, job_id: str, body: DrawingRequest | None = None) -> dict:
+    """(Re)generate the EN ISO detail drawing (PDF/SVG/DXF) of the current (or given) built version."""
+    job = await _require_job(request, job_id)
+    pipeline = _pipeline(request)
+    body = body or DrawingRequest()
+    v = body.version or job["current_version"]
+    if not v or not (pipeline.job_dir(job_id) / "versions" / f"v{v}" / "model.step").exists():
+        raise HTTPException(409, "deze versie heeft nog geen STEP-model")
+    from app.services.drawing_engine import get_engine
+
+    try:
+        get_engine(body.engine)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        info = await pipeline.regenerate_drawing(job_id, v, body.model_dump(exclude={"version"}))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"tekening mislukt: {type(exc).__name__}: {exc}") from exc
+    return {**info, "artifacts": _artifact_urls(pipeline, job_id, v)}
+
+
+@router.get("/drawing-engines")
+async def drawing_engines() -> list[dict]:
+    """DRAWING_SPEC §4: engines behind the DrawingEngine protocol and whether they can be used here."""
+    from app.services.drawing_engine import ENGINES
+
+    return [{"name": n, "description": e.description, "available": e.available(),
+             "installed": e.available() or getattr(e, "probe_installed", lambda: False)()} for n, e in ENGINES.items()]

@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from dataclasses import dataclass, field
+from typing import Protocol
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,7 @@ from app.schemas.part_spec import (
     PocketRect,
     Slot,
     StepCut,
+    parse_metric_thread,
 )
 from app.services.iso_template import (
     MARGIN,
@@ -207,6 +209,20 @@ def callout_lines(f, font: DrawingFont, dec: str) -> list[str]:
     return []
 
 
+GDT_SYMBOL = {"straightness": "⏤", "flatness": "⏥", "circularity": "○", "cylindricity": "⌭", "profile_line": "⌒",
+              "profile_surface": "⌓", "parallelism": "∥", "perpendicularity": "⊥", "angularity": "∠", "position": "⌖",
+              "concentricity": "◎", "symmetry": "⌯", "circular_runout": "↗", "total_runout": "⌰"}
+
+
+def gdt_note(g, font: DrawingFont, dec: str = ".") -> str:
+    """Tolerance frame as text: ``[⌖ | Ø0.1 | A | B] H1`` (the word when the font lacks the ISO 1101 symbol)."""
+    sym = GDT_SYMBOL[g.characteristic]
+    sym = sym if font.has(sym) else g.characteristic.upper().replace("_", " ")
+    zone = ("Ø" if g.diameter_zone else "") + fmt(g.tolerance_mm, dec)
+    target = f" {g.feature_id}" if g.feature_id else ""
+    return f"[{' | '.join([sym, zone, *g.datums])}]{target}" + (f" {g.note}" if g.note else "") + " (ISO 1101)"
+
+
 def plan_dimensions(spec: PartSpec, font: DrawingFont, dec: str) -> tuple[list[DimSpec], list[Callout]]:
     frames = _face_frames(spec)
     (x0, y0, z0), (x1, y1, z1) = spec.stock_bbox()
@@ -214,6 +230,8 @@ def plan_dimensions(spec: PartSpec, font: DrawingFont, dec: str) -> tuple[list[D
     dims: list[DimSpec] = []
     callouts: list[Callout] = []
     d = lambda v: fmt(v, dec)  # noqa: E731
+
+    depth_refs: dict[tuple[str, float], tuple[float, float, float]] = {}  # (face, level) -> (face z, depth, x extent)
 
     def add(view: str, axis: str, value: float) -> None:
         coords.setdefault((view, axis), set()).add(round(value, 4))
@@ -258,18 +276,28 @@ def plan_dimensions(spec: PartSpec, font: DrawingFont, dec: str) -> tuple[list[D
                 alts = [(a[0] + f.length_x / 2 * sgn, a[1]) for a in alts]
                 radius = 0.0
             callouts.append(Callout(view, anchor, radius, lines, f.id, alts))
-        # depth reference dims in the front view for top/bottom-face pockets, slots and steps
-        if f.face in ("top", "bottom") and isinstance(f, (PocketRect, PocketCircle, PocketPolygon, Slot, StepCut)) \
-                and not getattr(f, "through_all", False):
+        # depth reference dims in the front view (spec §4.3): pockets, slots, steps, blind holes, counterbores
+        if f.face in ("top", "bottom"):
             top = f.face == "top"
-            face_v = z1 if top else z0
-            level = face_v - f.depth if top else face_v + f.depth
             umax = max(p[0] for p in pts) if pts else x1
-            if isinstance(f, (PocketRect, PocketCircle, Slot)):
+            depths: list[tuple[float, float]] = []  # (depth, x extent of the feature)
+            if isinstance(f, (PocketRect, PocketCircle, PocketPolygon, Slot, StepCut)) and not getattr(f, "through_all", False):
                 ext = (f.length_x / 2 if isinstance(f, PocketRect) else f.diameter / 2 if isinstance(f, PocketCircle)
-                       else f.width / 2)
-                umax += ext
-            dims.append(DimSpec("front", "right", face_v, level, f"({d(f.depth)})", ext_b=min(umax, x1)))
+                       else f.width / 2 if isinstance(f, Slot) else 0.0)
+                depths.append((f.depth, umax + ext))
+            elif isinstance(f, Hole):
+                if not f.through_all and f.depth:
+                    depths.append((f.depth, umax + f.drill_diameter() / 2))
+                if f.counterbore:
+                    depths.append((f.counterbore.depth, umax + f.counterbore.diameter / 2))
+            for dv, ux in depths:
+                face_v = z1 if top else z0
+                level = round(face_v - dv if top else face_v + dv, 4)
+                prev = depth_refs.get((f.face, level))
+                depth_refs[(f.face, level)] = (face_v, dv, max(ux, prev[2]) if prev else ux)
+
+    for (_face, level), (face_v, dv, ux) in sorted(depth_refs.items(), key=lambda kv: kv[1][1]):
+        dims.append(DimSpec("front", "right", face_v, level, f"({d(dv)})", ext_b=min(ux, x1)))
 
     for p in (spec.outer_profile.points_2d or []) if spec.outer_profile.type == "polygon" else []:
         add("top", "h", p[0])
@@ -541,6 +569,50 @@ def _centerlines(sh: Sheet, spec: PartSpec, layout: Layout) -> None:
                             layer="CENTER")
 
 
+VISIBLE_FACE = {"top": "top", "front": "front", "left": "left"}  # the face each view looks at (others are behind)
+
+
+def _thread_symbols(sh: Sheet, spec: PartSpec, layout: Layout) -> None:
+    """EN ISO 6410-1 internal threads: the model carries the tap-drill bore, the drawing adds the nominal diameter.
+
+    Looking along the axis: thin 3/4 circle at the nominal diameter (dashed when on the far face). Axis in the view
+    plane: thin hidden lines at the nominal diameter down to the usable thread length + the thread-limit line."""
+    frames = _face_frames(spec)
+    for f in spec.features:
+        if not isinstance(f, Hole) or not f.thread:
+            continue
+        t = parse_metric_thread(f.thread)
+        if not t:
+            continue
+        R = t[0] / 2
+        length = f.thread_depth or (frames[f.face].thickness if f.through_all else (f.depth or frames[f.face].thickness))
+        for fx, fy in f.positions():
+            a3 = np.array(_global(frames, f.face, fx, fy, 0.0))
+            b3 = np.array(_global(frames, f.face, fx, fy, length))
+            axis = (b3 - a3) / max(np.linalg.norm(b3 - a3), 1e-9)
+            for name, p in layout.placements.items():
+                sa = p.to_sheet(*model_to_view(name, tuple(a3)))
+                sb = p.to_sheet(*model_to_view(name, tuple(b3)))
+                if math.hypot(sb[0] - sa[0], sb[1] - sa[1]) < 0.05:  # end view: 3/4 circle, gap in the 1st quadrant
+                    rr = R * p.scale
+                    pts = [(sa[0] + rr * math.cos(math.radians(a)), sa[1] - rr * math.sin(math.radians(a)))
+                           for a in np.linspace(100, 350, 36)]
+                    near = VISIBLE_FACE.get(name) == f.face
+                    sh.polyline(pts, width=sh.lines.thin, style="solid" if near else "hidden", layer="THREADS")
+                    continue
+                # side view: offset the axis by +-R perpendicular to it, within the view plane
+                for s in (-1.0, 1.0):
+                    perp = np.cross(axis, np.array(VIEW_DEFS[name][0]))
+                    perp = perp / max(np.linalg.norm(perp), 1e-9) * R * s
+                    pa = p.to_sheet(*model_to_view(name, tuple(a3 + perp)))
+                    pb = p.to_sheet(*model_to_view(name, tuple(b3 + perp)))
+                    sh.line(pa, pb, width=sh.lines.thin, style="hidden", layer="THREADS")
+                perp = np.cross(axis, np.array(VIEW_DEFS[name][0]))
+                perp = perp / max(np.linalg.norm(perp), 1e-9) * R
+                sh.line(p.to_sheet(*model_to_view(name, tuple(b3 - perp))), p.to_sheet(*model_to_view(name, tuple(b3 + perp))),
+                        width=sh.lines.thick, style="hidden", layer="THREADS")  # thread limit
+
+
 def _place_dims(sh: Sheet, obs: _Obstacles, dims: list[DimSpec], layout: Layout) -> None:
     groups: dict[tuple[str, str], list[DimSpec]] = {}
     for dm in dims:
@@ -677,7 +749,8 @@ def _edge_note(et, dec: str) -> str:
 
 def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | None = None, scale: str | None = None,
                      language: str | None = None, drawing_number: str | None = None, mass_g: float | None = None,
-                     owner: str = "", font_path: str | None = None, basename: str = "drawing") -> DrawingResult:
+                     owner: str = "", font_path: str | None = None, basename: str = "drawing",
+                     section_view: str | None = None) -> DrawingResult:
     """Render the EN ISO detail drawing of `shape` (compiled from `spec`) to PDF, SVG and DXF."""
     font = get_font(font_path)
     dm = spec.drawing_metadata
@@ -695,6 +768,14 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
         notes.append(f"{len(notes) + 1}. {_edge_note(et, dec)}")
     for f in spec.complex_features():
         notes.append(f"{len(notes) + 1}. {f.id}: {f.description.upper()} - SEE 3D MODEL")
+    for g in dm.gdt:  # EN ISO 1101 frames as text notes (spec §2 / §8.2)
+        notes.append(f"{len(notes) + 1}. {gdt_note(g, font, dec)}")
+    for sf in dm.surface_finishes:
+        notes.append(f"{len(notes) + 1}. {sf.feature_id}: Ra {fmt(sf.ra_um, dec)}" + (f" {sf.note}" if sf.note else "")
+                     + " (ISO 21920-1)")
+    for extra in dm.notes:
+        if extra.strip():
+            notes.append(f"{len(notes) + 1}. {extra.strip()}")
     if dm.approval_status == "DRAFT":
         notes.append("DRAFT - NOT RELEASED FOR PRODUCTION UNTIL DRAWN / CHECKED ARE SIGNED")
 
@@ -747,6 +828,7 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
     for p in layout.placements.values():
         obs.add(p.rect)
     _centerlines(sh, spec, layout)
+    _thread_symbols(sh, spec, layout)
     # datum origin marker in the top view
     tp = layout.placements["top"]
     sh.circle(tp.to_sheet(0.0, 0.0), 1.2, n=24, layer="DIMENSIONS")
@@ -775,6 +857,14 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
             balloons.append(f"({n}) {' / '.join(c.lines)}")
             warnings.append(f"callout for {c.feature_id} placed as balloon ({n})")
 
+    # section A-A (hatched) through the row with the most hidden features, then the isometric view
+    section_rect = None
+    yc = _section_plane(spec) if (section_view or dm.section_view) == "AUTO" else None
+    if yc is not None:
+        try:
+            section_rect = _place_section(sh, spec, shape, layout, obs, forbidden, yc)
+        except Exception as exc:  # noqa: BLE001 - a failed section never costs the drawing
+            warnings.append(f"section A-A skipped: {type(exc).__name__}: {exc}")
     # isometric view in the free corner (right of the top view, above the notes)
     iso_rect = _place_iso(sh, views["iso"], layout, obs, forbidden)
     if iso_rect is None:
@@ -792,6 +882,8 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
     rects = {k: p.rect for k, p in layout.placements.items()}
     if iso_rect:
         rects["iso"] = iso_rect
+    if section_rect:
+        rects["section"] = section_rect
     return DrawingResult(pdf, svg, dxf, layout.sheet, layout.scale_label, rects,
                          [sh.text_box(t) for t in sh.texts], balloons, warnings)
 
@@ -804,6 +896,159 @@ def _parse_scale(label: str) -> tuple[float, str]:
 def _notes_box(sh: Sheet, notes: list[str]) -> Box:
     probe = Sheet(sh.size, sh.font)
     return notes_block(probe, notes + ["(n) reserve line for balloons"], sh.title_block[1] - 1.5, sh.inner[2])
+
+
+# --------------------------------------------------------------------------- #
+# Section A-A with ISO 128-50 hatching
+# --------------------------------------------------------------------------- #
+
+HATCH_SPACING = 2.5  # mm on the sheet (EN ISO 128-50: thin lines at 45°, spacing to suit the size)
+
+
+def _section_plane(spec: PartSpec) -> float | None:
+    """Y of the section plane through the row with the most internal (top/bottom) features; None if pointless."""
+    (x0, y0, z0), (x1, y1, z1) = spec.stock_bbox()
+    spans: list[tuple[float, float, float]] = []  # (y_lo, y_hi, weight)
+    for f in spec.features:
+        if f.face not in ("top", "bottom"):
+            continue
+        internal = not getattr(f, "through_all", False) or (isinstance(f, Hole) and (f.counterbore or f.countersink))
+        w = 2.0 if internal else 1.0
+        if isinstance(f, Hole):
+            r = max(f.drill_diameter(), f.counterbore.diameter if f.counterbore else 0,
+                    f.countersink.diameter if f.countersink else 0) / 2
+            spans += [(y - r, y + r, w) for _, y in f.positions()]
+        elif isinstance(f, (PocketRect, BossRect)):
+            hy = _rot_half(f.length_x, f.width_y, f.rotation_deg)[1]
+            spans += [(y - hy, y + hy, w) for _, y in f.positions()]
+        elif isinstance(f, (PocketCircle, BossCircle)):
+            spans += [(y - f.diameter / 2, y + f.diameter / 2, w) for _, y in f.positions()]
+        elif isinstance(f, Slot):
+            spans.append((min(f.start_y, f.end_y) - f.width / 2, max(f.start_y, f.end_y) + f.width / 2, w))
+        elif isinstance(f, StepCut):
+            spans.append((f.y_min, f.y_max, w))
+        elif isinstance(f, PocketPolygon):
+            ys = [p[1] for p in f.points_2d]
+            spans.append((min(ys), max(ys), w))
+    if not any(w > 1.0 for *_, w in spans):
+        return None  # nothing hidden inside: the outside views tell it all
+    cands = {round((a + b) / 2, 4) for a, b, _ in spans} | {round((y0 + y1) / 2, 4)}
+    cands = {c for c in cands if y0 + 0.2 < c < y1 - 0.2}
+    mid = (y0 + y1) / 2
+    return max(cands, key=lambda c: (sum(w for a, b, w in spans if a + 1e-6 < c < b - 1e-6), -abs(c - mid)), default=None)
+
+
+def _rot_half(length: float, width: float, rot_deg: float) -> tuple[float, float]:
+    a = math.radians(rot_deg)
+    c, s = abs(math.cos(a)), abs(math.sin(a))
+    return (length * c + width * s) / 2, (length * s + width * c) / 2
+
+
+def _loops_xz(face) -> list[list[tuple[float, float]]]:
+    """Closed loops of a planar face in (x, z), edges sampled and chained end to end."""
+    loops = []
+    for wire in [face.outer_wire(), *face.inner_wires()]:
+        segs = []
+        for e in wire.edges():
+            n = 2 if (getattr(e.geom_type, "name", str(e.geom_type)) == "LINE") else max(12, int(e.length / 1.0) + 6)
+            segs.append([(p.X, p.Z) for p in (e @ t for t in np.linspace(0.0, 1.0, n))])
+        if not segs:
+            continue
+        loop = list(segs.pop(0))
+        while segs:
+            end = loop[-1]
+            k = min(range(len(segs)), key=lambda i: min(math.dist(end, segs[i][0]), math.dist(end, segs[i][-1])))
+            s = segs.pop(k)
+            loop += (s if math.dist(end, s[0]) <= math.dist(end, s[-1]) else s[::-1])[1:]
+        loops.append(loop)
+    return loops
+
+
+def _hatch(polys: list[list[tuple[float, float]]], spacing: float) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    """45° hatch segments (sheet coords, y down) inside `polys` (even-odd: holes stay empty)."""
+    edges = [(p[i], p[(i + 1) % len(p)]) for p in polys for i in range(len(p))]
+    if not edges:
+        return []
+    vals = [x + y for p in polys for x, y in p]  # lines x + y = c run at 45° on the sheet (y down)
+    out = []
+    c = math.floor(min(vals) / (spacing * math.sqrt(2))) * spacing * math.sqrt(2)
+    while c <= max(vals):
+        hits = []
+        for (ax, ay), (bx, by) in edges:
+            fa, fb = ax + ay - c, bx + by - c
+            if (fa > 0) != (fb > 0):
+                t = fa / (fa - fb)
+                hits.append((ax + (bx - ax) * t, ay + (by - ay) * t))
+        hits.sort()
+        out += [(hits[i], hits[i + 1]) for i in range(0, len(hits) - 1, 2)]
+        c += spacing * math.sqrt(2)
+    return out
+
+
+def _place_section(sh: Sheet, spec: PartSpec, shape, layout: Layout, obs: _Obstacles, forbidden: Box,
+                   yc: float) -> Box | None:
+    from build123d import Align, Box as BBox, Compound, Location
+
+    (x0, y0, z0), (x1, y1, z1) = spec.stock_bbox()
+    bb = shape.bounding_box()
+    cutter = BBox(bb.size.X + 2, bb.max.Y - yc + 1, bb.size.Z + 2, align=(Align.MIN, Align.MIN, Align.MIN)).moved(
+        Location((bb.min.X - 1, yc, bb.min.Z - 1)))
+    half = shape.intersect(cutter)
+    if half is not None and not hasattr(half, "bounding_box"):  # build123d 0.13: ShapeList
+        half = Compound(list(half)) if len(half) else None
+    if half is None or not half.solids():
+        return None
+    vp = project_views(half)["front"]  # same direction as the front view; sections show no hidden lines
+    cut_faces = [f for f in half.faces()
+                 if abs(f.center().Y - yc) < 1e-4 and abs(abs(f.normal_at(f.center()).Y) - 1) < 1e-6]
+    loops = [lp for f in cut_faces for lp in _loops_xz(f)]
+
+    top, left = layout.placements["top"].rect, layout.placements["left"].rect
+    fx0, fy0 = max(top[2] + 12, left[0] - 10), left[3] + 14
+    fx1, fy1 = sh.inner[2] - 4, forbidden[1] - 6
+    u0, v0, u1, v1 = vp.bbox
+    w, h = u1 - u0, v1 - v0
+    p = None
+    for s in (sv for sv, _ in ISO_SCALES if sv <= layout.scale + 1e-9):
+        if w * s < 25 or w * s > fx1 - fx0:
+            continue
+        for ay in (0.0, 0.5, 1.0):
+            cx = fx0 + (fx1 - fx0) / 2
+            cy = fy0 + h * s / 2 + max(0.0, fy1 - fy0 - 9 - h * s) * ay
+            ox, oy = cx - (u0 + u1) / 2 * s, cy + (v0 + v1) / 2 * s
+            cand = Placement("section", ox, oy, s, (ox + u0 * s, oy - v1 * s, ox + u1 * s, oy - v0 * s))
+            label_box = (cand.rect[0], cand.rect[3], cand.rect[2], cand.rect[3] + 9)
+            if cand.rect[3] + 9 <= fy1 and obs.free(cand.rect, pad=1.5) and obs.free(label_box, pad=0.5):
+                p = cand
+                break
+        if p is not None:
+            break
+    if p is None:
+        return None
+    s = p.scale
+    for pl in vp.visible:
+        sh.polyline([p.to_sheet(u, v) for u, v in pl], width=sh.lines.thick, layer="VISIBLE")
+    polys = [[p.to_sheet(x, z) for x, z in lp] for lp in loops]
+    for a, b in _hatch(polys, HATCH_SPACING):
+        sh.line(a, b, width=sh.lines.thin, layer="HATCH")
+    scale_txt = "" if abs(s - layout.scale) < 1e-9 else f" ({next(lb for sv, lb in ISO_SCALES if sv == s)})"
+    label_box = sh.text(f"SECTION A-A{scale_txt}", (p.rect[0] + p.rect[2]) / 2, p.rect[3] + 6.5, TEXT_DIM, "middle",
+                        layer="NOTES")
+    obs.add(p.rect)
+    obs.add(label_box, blocks_leaders=True)
+
+    # cutting plane in the top view (EN ISO 128-44): chain line, thick ends, arrows in the viewing direction (+Y)
+    tp = layout.placements["top"]
+    ya = tp.to_sheet(x0, yc)[1]
+    xa, xb = tp.to_sheet(x0, yc)[0] - 7, tp.to_sheet(x1, yc)[0] + 7
+    sh.line((xa + 6, ya), (xb - 6, ya), style="center", layer="CENTER")
+    for xe, inward in ((xa, 1.0), (xb, -1.0)):
+        sh.line((xe, ya), (xe + 6 * inward, ya), width=sh.lines.thick, layer="CENTER")
+        sh.line((xe + 2 * inward, ya), (xe + 2 * inward, ya - 5), width=sh.lines.thin, layer="DIMENSIONS")
+        sh.arrow((xe + 2 * inward, ya - 6.5), (xe + 2 * inward, ya))
+        lb = sh.text("A", xe + 2 * inward - 2.5 * inward, ya - 8.5, TEXT_DIM, "middle", layer="NOTES")
+        obs.add(lb, blocks_leaders=True)
+    return p.rect
 
 
 def _place_iso(sh: Sheet, iso: ViewProjection, layout: Layout, obs: _Obstacles, forbidden: Box) -> Box | None:
@@ -842,3 +1087,76 @@ def _place_iso(sh: Sheet, iso: ViewProjection, layout: Layout, obs: _Obstacles, 
     obs.add(p.rect)
     _ = MARGIN
     return p.rect
+
+
+# --------------------------------------------------------------------------- #
+# Engine protocol (DRAWING_SPEC.md §4: secondary / fallback engines behind one interface)
+# --------------------------------------------------------------------------- #
+
+
+class DrawingEngine(Protocol):
+    name: str
+    description: str
+
+    def available(self) -> bool: ...
+
+    def render(self, spec: PartSpec, shape, out_dir: Path, **opts) -> DrawingResult: ...
+
+
+class BuiltinEngine:
+    name = "builtin"
+    description = "Semantic build123d HLR + EN ISO sheet composer (this module)"
+
+    def available(self) -> bool:
+        return True
+
+    def render(self, spec: PartSpec, shape, out_dir: Path, **opts) -> DrawingResult:
+        return generate_drawing(spec, shape, out_dir, **opts)
+
+
+class _ExternalEngine:
+    """Placeholder for the optional engines named in the spec; reports itself unavailable until an adapter exists."""
+
+    def __init__(self, name: str, description: str, probe):
+        self.name, self.description, self._probe = name, description, probe
+
+    def available(self) -> bool:
+        return False  # no adapter yet, even when the tool itself is installed (see probe_installed)
+
+    def probe_installed(self) -> bool:
+        try:
+            return bool(self._probe())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def render(self, spec: PartSpec, shape, out_dir: Path, **opts) -> DrawingResult:
+        raise NotImplementedError(f"drawing engine {self.name!r} has no adapter yet")
+
+
+def _has_module(mod: str) -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec(mod) is not None
+
+
+def _has_exe(exe: str) -> bool:
+    import shutil
+
+    return shutil.which(exe) is not None
+
+
+ENGINES: dict[str, DrawingEngine] = {
+    "builtin": BuiltinEngine(),
+    "draftwright": _ExternalEngine("draftwright", "draftwright plug-in for complex_3d parts (optional)",
+                                   lambda: _has_module("draftwright")),
+    "freecad": _ExternalEngine("freecad", "FreeCAD headless TechDraw (future fallback for offset sections)",
+                               lambda: _has_exe("freecadcmd")),
+}
+
+
+def get_engine(name: str | None) -> DrawingEngine:
+    eng = ENGINES.get(name or "builtin")
+    if eng is None or not eng.available():
+        ok = [n for n, e in ENGINES.items() if e.available()]
+        raise ValueError(f"drawing engine {name!r} is not available (available: {', '.join(ok)})")
+    return eng

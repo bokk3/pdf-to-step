@@ -67,3 +67,35 @@ def test_sketch_values_are_capped_for_review():
     assert max(confs) <= 0.75
     assert len(spec.review_items()) >= len(spec.features)  # everything shows up amber in the Spec tab
     assert isinstance(spec, PartSpec)
+
+
+def test_sketch_ocr_layer_uses_recognition_purpose(settings, tmp_path):
+    """Files API text layer (DRAWING_SPEC §3 route A experiment): uploads with the OCR purpose, cached per job."""
+    import asyncio
+
+    from app.services.deepseek_client import DeepSeekClient, ExtractionImage
+
+    tiles = tmp_path / "job" / "tiles"
+    tiles.mkdir(parents=True)
+    imgs = []
+    for name in ("tile_top.llm.png", "title_block.llm.png"):
+        p = tiles / name
+        p.write_bytes(name.encode())
+        imgs.append(ExtractionImage(name.replace(".llm.png", ""), p))
+    calls = []
+
+    class Files:
+        async def create(self, file, purpose):
+            calls.append(purpose)
+            return type("F", (), {"id": f"file-{len(calls)}"})()
+
+    s = settings.model_copy(update={"deepseek_api_key": "test", "sketch_ocr": "text_recognition", "sketch_ocr_wait_s": 0})
+    client = DeepSeekClient(s)
+    client.client = type("C", (), {"files": Files()})()
+    parts = asyncio.run(client._ocr_parts(imgs, "text_recognition"))
+    assert calls == ["text_recognition", "text_recognition"]
+    assert [p["type"] for p in parts] == ["text", "file", "text", "file"] and parts[1]["file_id"] == "file-1"
+    assert "the image wins" in parts[0]["text"]
+    asyncio.run(client._ocr_parts(imgs, "text_recognition"))  # cached: no new uploads
+    assert len(calls) == 2
+    assert (tmp_path / "job" / "llm" / "file_ids_text_recognition.json").exists()

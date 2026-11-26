@@ -116,6 +116,7 @@ function Body({ job, running, tick, onGenerated, large }: Omit<Props, 'variant'>
     sheet: (info?.overrides.sheet_size ?? meta?.sheet_size ?? 'AUTO') as SheetSize,
     scale: info?.overrides.scale ?? meta?.scale ?? 'AUTO',
     lang: (info?.overrides.language ?? meta?.language ?? 'EN') as DrawingLanguage,
+    section: (info?.overrides.section_view ?? meta?.section_view ?? 'AUTO') !== 'NONE',
   })
   const [opts, setOpts] = useState(initial)
   const [busy, setBusy] = useState(false)
@@ -134,7 +135,7 @@ function Body({ job, running, tick, onGenerated, large }: Omit<Props, 'variant'>
     setError(null)
     try {
       await api.generateDrawing(job.job_id, { sheet_size: opts.sheet, scale: opts.scale, language: opts.lang,
-        version: job.version })
+        section_view: opts.section ? 'AUTO' : 'NONE', version: job.version })
       onGenerated()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -184,6 +185,11 @@ function Body({ job, running, tick, onGenerated, large }: Omit<Props, 'variant'>
           <select className={sel} value={opts.scale} onChange={(e) => setOpts({ ...opts, scale: e.target.value })}>
             {scales.map((s) => <option key={s} value={s}>{s === 'AUTO' ? 'Automatisch' : s}</option>)}
           </select>
+        </label>
+        <label className="col-span-2 flex items-center gap-2 text-slate-300">
+          <input type="checkbox" className={large ? 'h-5 w-5' : ''} checked={opts.section}
+            onChange={(e) => setOpts({ ...opts, section: e.target.checked })} />
+          Doorsnede A-A (gearceerd, EN ISO 128-50) waar er verborgen vormen zijn
         </label>
         <label className="col-span-2 block">
           <span className="field-label">taal titelblok</span>

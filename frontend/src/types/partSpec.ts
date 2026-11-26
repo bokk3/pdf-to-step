@@ -173,6 +173,26 @@ export interface DrawingMetadata {
   drawn_by: string
   checked_by: string
   approval_status: 'DRAFT' | 'APPROVED'
+  /** hatched section A-A (EN ISO 128-50) when the part has hidden features */
+  section_view?: 'AUTO' | 'NONE'
+  /** EN ISO 1101 frames, printed as notes (not modelled in 3D) */
+  gdt?: GeometricTolerance[]
+  /** per-feature EN ISO 21920-1 requirements (the general one is surface_finish) */
+  surface_finishes?: { feature_id: string; ra_um: number; note?: string }[]
+  notes?: string[]
+}
+
+export type GdtCharacteristic =
+  | 'straightness' | 'flatness' | 'circularity' | 'cylindricity' | 'profile_line' | 'profile_surface' | 'parallelism'
+  | 'perpendicularity' | 'angularity' | 'position' | 'concentricity' | 'symmetry' | 'circular_runout' | 'total_runout'
+
+export interface GeometricTolerance {
+  characteristic: GdtCharacteristic
+  tolerance_mm: number
+  diameter_zone?: boolean
+  datums?: string[]
+  feature_id?: string | null
+  note?: string
 }
 
 export interface MissingDimension {
@@ -314,7 +334,7 @@ export interface DrawingInfo {
   scale: string
   warnings: string[]
   balloons: string[]
-  overrides: { sheet_size?: SheetSize; scale?: string; language?: DrawingLanguage }
+  overrides: { sheet_size?: SheetSize; scale?: string; language?: DrawingLanguage; section_view?: 'AUTO' | 'NONE'; engine?: string }
   duration_s?: number
 }
 

@@ -1,0 +1,43 @@
+{
+ "schema_version": "1.1",
+ "input_source": "paper_sketch",
+ "part_name": "Geleiding G5",
+ "material": "AlMgSi1",
+ "general_tolerance": "ISO 2768-mK",
+ "stock": {
+  "length_x": 200,
+  "width_y": 50,
+  "thickness_z": 25
+ },
+ "outer_profile": {
+  "type": "rectangle"
+ },
+ "features": [
+  {
+   "id": "P1",
+   "type": "pocket_rect",
+   "face": "top",
+   "center_x": 100,
+   "center_y": 25,
+   "length_x": 160,
+   "width_y": 30,
+   "corner_radius": 6,
+   "depth": 10
+  },
+  {
+   "id": "H1",
+   "type": "hole",
+   "face": "top",
+   "center_x": 10,
+   "center_y": 25,
+   "diameter": 8.5,
+   "through_all": true,
+   "extra_positions": [
+    [
+     190,
+     25
+    ]
+   ]
+  }
+ ]
+}

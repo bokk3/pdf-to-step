@@ -6,11 +6,11 @@ import asyncio
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.db import JobStore
 from app.schemas.part_spec import PartSpec, partspec_json_schema
@@ -263,28 +263,3 @@ async def get_artifact(request: Request, job_id: str, filename: str, version: in
     elif download:
         kwargs["filename"] = p.name
     return FileResponse(p, headers={"Cache-Control": "no-cache"}, **kwargs)
-
-
-class DrawingRequest(BaseModel):
-    """DRAWING_SPEC §6: optional overrides; anything left out comes from part_spec.drawing_metadata."""
-    sheet_size: Literal["AUTO", "A4_LANDSCAPE", "A3_LANDSCAPE"] | None = None
-    scale: str | None = Field(None, pattern=r"^(AUTO|\d+(\.\d+)?:\d+(\.\d+)?)$")
-    language: Literal["EN", "EN_NL"] | None = None
-    engine: Literal["builtin"] = "builtin"
-    version: int | None = None
-
-
-@router.post("/jobs/{job_id}/drawing")
-async def generate_drawing(request: Request, job_id: str, body: DrawingRequest | None = None) -> dict:
-    """(Re)generate the EN ISO detail drawing (PDF/SVG/DXF) of the current (or given) built version."""
-    job = await _require_job(request, job_id)
-    pipeline = _pipeline(request)
-    body = body or DrawingRequest()
-    v = body.version or job["current_version"]
-    if not v or not (pipeline.job_dir(job_id) / "versions" / f"v{v}" / "model.step").exists():
-        raise HTTPException(409, "deze versie heeft nog geen STEP-model")
-    try:
-        info = await pipeline.regenerate_drawing(job_id, v, body.model_dump(exclude={"engine", "version"}))
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(500, f"tekening mislukt: {type(exc).__name__}: {exc}") from exc
-    return {**info, "artifacts": _artifact_urls(pipeline, job_id, v)}

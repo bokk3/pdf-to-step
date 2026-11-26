@@ -91,7 +91,7 @@ export const api = {
   /** DRAWING_SPEC §6: (re)generate the EN ISO drawing of the current version, optional overrides. */
   generateDrawing: (
     id: string,
-    overrides: { sheet_size?: SheetSize; scale?: string; language?: DrawingLanguage; version?: number } = {},
+    overrides: { sheet_size?: SheetSize; scale?: string; language?: DrawingLanguage; section_view?: 'AUTO' | 'NONE'; version?: number } = {},
   ) =>
     request<DrawingInfo & { artifacts: Record<string, string> }>(`/api/jobs/${id}/drawing`, {
       method: 'POST',

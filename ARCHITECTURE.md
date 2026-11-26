@@ -434,7 +434,35 @@ data/jobs/<job_id>/
 * The generated PDF parses back through `pdf_parser.py`; the ISO 5457 grid labels in the margin are tagged
   `sheet_grid` and left out of the LLM digest so they are never read as dimensions.
 * Drawings are rendered on the render worker for every full pipeline build and after every `PATCH /spec`
-  (deferred, with the ortho renders); a drawing failure is logged but never fails the gate.
+  (deferred, with the ortho renders); a drawing failure is logged but never fails the gate. The MASS cell is
+  filled from the material density table.
+* Lettering: the default font is the first installed sans-serif that also carries ⌴ ⌵ ↧ Ø ° (Segoe UI Symbol on
+  Windows, embedding permitted, fsType 8), so callouts read `⌴Ø11 ↧6.8` / `⌵Ø9 x 90°` as one selectable run;
+  without such a font DejaVu Sans is used and the callouts say `CBORE` / `CSK`. Every text on the sheet is
+  ≥ 2.5 mm (EN ISO 3098, spec §2), including the title-block field names: the block is 40 mm high (rows
+  14 / 13 / 13 mm; ISO 7200 fixes only the 180 mm width), EN/NL labels that do not fit one line are set EN over
+  NL, long values wrap instead of shrinking.
+* EN ISO 6410 threads: the model carries the tap-drill bore; the drawing adds a thin ¾ circle at the nominal
+  diameter where the view looks along the axis (dashed on the far face) and thin hidden lines at the nominal
+  diameter to the usable thread length plus the thread-limit line where the axis lies in the view.
+* Section A–A (EN ISO 128-40/-44/-50), `drawing_metadata.section_view = AUTO|NONE`: when the part has hidden
+  top/bottom features, the cut runs parallel to XZ through the row with the most of them (blind / seated
+  features count double), the part behind the plane is projected like the front view without hidden lines, cut
+  faces are hatched with thin 45° lines (2.5 mm, even-odd so holes stay open), the cutting plane is drawn on the
+  top view (chain line, thick ends, arrows in the viewing direction, letters A). It goes in the free area above
+  the isometric view, at the main scale or the largest smaller ISO scale that fits (then stated in its label);
+  without room it is left out.
+* Depths in the front view (spec §4.3): reference dimensions `(d)` for pocket, slot and step floors, blind holes
+  and counterbores, one per depth level; the callouts keep `↧`.
+* `drawing_metadata.gdt` (EN ISO 1101 frames), `surface_finishes` (per-feature Ra) and `notes` are printed as
+  numbered notes, e.g. `[⌖ | Ø0.1 | A | B] H1 (ISO 1101)`; they never change the geometry (spec §8.2).
+* `DrawingEngine` protocol + registry (`GET /api/drawing-engines`): `builtin` is this engine; `draftwright` and
+  `freecad` are registered as not available (no adapter; the spec makes them optional / future). `POST /drawing`
+  answers 422 for an unavailable engine.
+* Deliberate deviations from the letter of DRAWING_SPEC §4: PDF straight from PyMuPDF instead of SVG → CairoSVG /
+  WeasyPrint (no native Cairo on Windows; text stays selectable, which is what the spec needs it for); towards the
+  frame the views keep only the room their dimensions need (+5 mm clear of the centring marks) instead of a flat
+  25 mm, while two neighbouring views stay ≥ 25 mm apart; the scale solver lives in `drawing_engine.py`.
 
 ### 11.9 Round-trip benchmark (DRAWING_SPEC.md phase 2)
 * `python -m app.services.roundtrip_bench --n 10 --seed 7 --llm deepseek --thinking enabled,disabled

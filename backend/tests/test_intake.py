@@ -139,3 +139,9 @@ def _png_without_markers() -> bytes:
 
     ok, buf = cv2.imencode(".png", np.full((900, 1200, 3), 240, np.uint8))
     return buf.tobytes()
+
+
+def test_drawing_engine_registry(client):
+    engines = {e["name"]: e for e in client.get("/api/drawing-engines").json()}
+    assert engines["builtin"]["available"] is True
+    assert {"draftwright", "freecad"} <= set(engines) and not engines["freecad"]["available"]

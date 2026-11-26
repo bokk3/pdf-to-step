@@ -1,0 +1,50 @@
+{
+ "schema_version": "1.1",
+ "input_source": "paper_sketch",
+ "part_name": "Afdekplaat D4",
+ "material": "POM-C",
+ "general_tolerance": "ISO 2768-mK",
+ "stock": {
+  "length_x": 80,
+  "width_y": 80,
+  "thickness_z": 10
+ },
+ "outer_profile": {
+  "type": "rounded_rectangle",
+  "corner_radius": 8
+ },
+ "features": [
+  {
+   "id": "H1",
+   "type": "hole",
+   "face": "top",
+   "center_x": 40,
+   "center_y": 40,
+   "diameter": 20,
+   "through_all": true
+  },
+  {
+   "id": "H2",
+   "type": "hole",
+   "face": "top",
+   "center_x": 15,
+   "center_y": 15,
+   "diameter": 5.5,
+   "through_all": true,
+   "extra_positions": [
+    [
+     65,
+     15
+    ],
+    [
+     15,
+     65
+    ],
+    [
+     65,
+     65
+    ]
+   ]
+  }
+ ]
+}

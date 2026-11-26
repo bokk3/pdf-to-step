@@ -318,6 +318,31 @@ CUT_TYPES = (Hole, PocketRect, PocketCircle, PocketPolygon, Slot, StepCut)
 InputSource = Literal["pdf_drawing", "paper_sketch", "dxf", "step", "manual"]
 
 
+GdtCharacteristic = Literal[
+    "straightness", "flatness", "circularity", "cylindricity", "profile_line", "profile_surface", "parallelism",
+    "perpendicularity", "angularity", "position", "concentricity", "symmetry", "circular_runout", "total_runout",
+]
+
+
+class GeometricTolerance(_Model):
+    """EN ISO 1101 tolerance frame. Carried as metadata and printed as a drawing note; not modelled in 3D (v1)."""
+
+    characteristic: GdtCharacteristic
+    tolerance_mm: Pos
+    diameter_zone: bool = Field(False, description="Ø tolerance zone (e.g. position Ø0.1)")
+    datums: list[str] = Field(default_factory=list, max_length=3, description="datum letters, primary first")
+    feature_id: str | None = Field(None, description="toleranced feature, None = whole part / see note")
+    note: str = ""
+
+
+class SurfaceFinish(_Model):
+    """EN ISO 21920-1 surface requirement for one feature (the general one is drawing_metadata.surface_finish)."""
+
+    feature_id: str
+    ra_um: Pos
+    note: str = ""
+
+
 class DrawingMetadata(_Model):
     """Presentation data for the generated EN ISO drawing (never affects geometry)."""
 
@@ -332,6 +357,10 @@ class DrawingMetadata(_Model):
     drawn_by: str = ""
     checked_by: str = ""
     approval_status: Literal["DRAFT", "APPROVED"] = "DRAFT"
+    section_view: Literal["AUTO", "NONE"] = Field("AUTO", description="hatched section A-A when the part has hidden features")
+    gdt: list[GeometricTolerance] = Field(default_factory=list, description="EN ISO 1101 frames (text notes in v1)")
+    surface_finishes: list[SurfaceFinish] = Field(default_factory=list, description="per-feature Ra requirements")
+    notes: list[str] = Field(default_factory=list, description="extra general notes printed on the drawing")
 
 
 class MissingDimension(_Model):

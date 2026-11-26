@@ -384,6 +384,7 @@ class Variant:
     name: str
     thinking: str | None = None
     prompt_appendix: str = ""
+    sketch_ocr: str = "off"
     results: list[dict] = field(default_factory=list)
 
 
@@ -410,9 +411,9 @@ def prepare_synthetic(specs: list[PartSpec], root: Path, oracle_dir: Path) -> li
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
 
 
-def prepare_fixtures(fixture_dir: Path, oracle_dir: Path) -> list[Case]:
+def prepare_fixtures(fixture_dir: Path, oracle_dir: Path, root: Path | None = None) -> list[Case]:
     """Fixture PDFs and sketch photos (``X.pdf`` / ``X.jpg`` + ``X.part_spec.json``)."""
-    from app.services.cad_compiler import compile_part
+    from app.services.cad_compiler import compile_part, export_step_file
 
     cases = []
     files = sorted(p for p in fixture_dir.iterdir() if p.suffix.lower() in (".pdf",) + IMAGE_SUFFIXES)
@@ -425,7 +426,16 @@ def prepare_fixtures(fixture_dir: Path, oracle_dir: Path) -> list[Case]:
             continue
         shutil.copyfile(sp, oracle_dir / sp.name)
         kind = "sketch" if pdf.suffix.lower() in IMAGE_SUFFIXES else "fixture"
-        cases.append(Case(pdf.stem, kind, pdf, spec, shape_metrics(compile_part(spec).shape)))
+        shape = compile_part(spec).shape
+        gt = shape_metrics(shape)
+        if root is not None:  # same per-case layout as the synthetic cases
+            d = root / "cases" / pdf.stem
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "ground_truth.part_spec.json").write_text(spec.model_dump_json(indent=1), encoding="utf-8")
+            export_step_file(shape, d / "ground_truth.step")
+            (d / "ground_truth.json").write_text(json.dumps(gt, indent=1), encoding="utf-8")
+            shutil.copyfile(pdf, d / f"source{pdf.suffix.lower()}")
+        cases.append(Case(pdf.stem, kind, pdf, spec, gt))
     return cases
 
 
@@ -454,7 +464,8 @@ async def run_variant(variant: Variant, cases: list[Case], base: Settings, llm_k
 
     data = root / "runs" / variant.name
     data.mkdir(parents=True, exist_ok=True)
-    upd: dict[str, Any] = {"data_dir": data, "extraction_prompt_appendix": variant.prompt_appendix}
+    upd: dict[str, Any] = {"data_dir": data, "extraction_prompt_appendix": variant.prompt_appendix,
+                           "sketch_ocr": variant.sketch_ocr}
     if variant.thinking:
         upd["deepseek_thinking"] = variant.thinking
     if critic is not None:
@@ -487,8 +498,14 @@ async def run_variant(variant: Variant, cases: list[Case], base: Settings, llm_k
                                    "status": job.get("status"), "latency_s": round(dt, 2), "usage": _usage(jd),
                                    "heal_iterations": len(pipe.iteration_logs(job.get("id", "")))}
             pred_spec = None
+            cdir = root / "cases" / case.name
+            cdir.mkdir(parents=True, exist_ok=True)
             if job.get("current_version"):
                 pred_spec = pipe.load_spec(job["id"], job["current_version"])
+                (cdir / f"predicted_{variant.name}.part_spec.json").write_text(pred_spec.model_dump_json(indent=1),
+                                                                             encoding="utf-8")
+            if (jd / "model.step").exists():
+                shutil.copyfile(jd / "model.step", cdir / f"predicted_{variant.name}.step")
             pred_geo = None
             if (jd / "model.step").exists():
                 try:
@@ -611,6 +628,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--thinking", default="", help="comma list, e.g. enabled,disabled (deepseek only)")
     ap.add_argument("--prompt-variant", action="append", default=[], metavar="NAME=FILE",
                     help="extra extraction instructions from FILE; repeat for A/B (baseline is always included)")
+    ap.add_argument("--sketch-ocr", default="off",
+                    help="comma list of off,text_recognition,rich_layout_recognition (sketch photos, deepseek only)")
     ap.add_argument("--fixtures", type=Path, default=BACKEND_DIR / "tests" / "fixtures")
     ap.add_argument("--no-fixtures", action="store_true")
     ap.add_argument("--no-critic", action="store_true", help="skip the visual critic (faster)")
@@ -631,14 +650,16 @@ async def run(args: argparse.Namespace, base: Settings | None = None) -> Path:
     specs = generate_specs(args.n, args.seed, base) if args.n > 0 else []
     cases = prepare_synthetic(specs, root, oracle)
     if not args.no_fixtures and args.fixtures.exists():
-        cases += prepare_fixtures(args.fixtures, oracle)
+        cases += prepare_fixtures(args.fixtures, oracle, root)
     thinking = [t.strip() for t in args.thinking.split(",") if t.strip()] if args.llm == "deepseek" else []
     prompts: list[tuple[str, str]] = [("base", "")]
     for pv in args.prompt_variant:
         name, _, path = pv.partition("=")
         prompts.append((name.strip(), Path(path).read_text(encoding="utf-8")))
-    variants = [Variant(f"{p}" + (f"-thinking-{t}" if t else ""), t or None, text)
-                for p, text in prompts for t in (thinking or [""])]
+    ocrs = [o.strip() for o in args.sketch_ocr.split(",") if o.strip()] if args.llm == "deepseek" else ["off"]
+    variants = [Variant(f"{p}" + (f"-thinking-{t}" if t else "") + (f"-ocr-{o}" if len(ocrs) > 1 or o != "off" else ""),
+                        t or None, text, o)
+                for p, text in prompts for t in (thinking or [""]) for o in (ocrs or ["off"])]
     for v in variants:
         print(f"[bench] variant {v.name}: {len(cases)} case(s)", flush=True)
         await run_variant(v, cases, base, args.llm, oracle, root, args.concurrency,

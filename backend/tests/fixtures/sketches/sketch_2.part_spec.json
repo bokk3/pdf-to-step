@@ -1,0 +1,44 @@
+{
+ "schema_version": "1.1",
+ "input_source": "paper_sketch",
+ "part_name": "Lagersteun B2",
+ "material": "S355",
+ "general_tolerance": "ISO 2768-mK",
+ "stock": {
+  "length_x": 100,
+  "width_y": 60,
+  "thickness_z": 20
+ },
+ "outer_profile": {
+  "type": "rectangle"
+ },
+ "features": [
+  {
+   "id": "T1",
+   "type": "hole",
+   "face": "top",
+   "center_x": 25,
+   "center_y": 20,
+   "diameter": 8,
+   "thread": "M8",
+   "through_all": true,
+   "extra_positions": [
+    [
+     75,
+     20
+    ]
+   ]
+  },
+  {
+   "id": "S1",
+   "type": "slot",
+   "face": "top",
+   "start_x": 30,
+   "start_y": 45,
+   "end_x": 70,
+   "end_y": 45,
+   "width": 8,
+   "depth": 5
+  }
+ ]
+}

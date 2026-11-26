@@ -93,6 +93,8 @@ All settings live in `.env` (see [.env.example](.env.example)). The most importa
 | `MAX_HEAL_RETRIES` / `SANDBOX_TIMEOUT_S` | `3` / `15` | self-healing budget, LLM-code execution limit |
 | `STEP_SCHEMA` | `AP214` | or `AP242` |
 | `DFM_*` | §8 values | corner radius 1.5 mm, hole depth 5×D, pocket depth 4×R, wall 1.5 mm, bbox ±0.01 mm |
+| `DRAWING_FONT` | auto | lettering font; default Segoe UI Symbol when installed (real ⌴ ⌵ ↧ symbols), else DejaVu Sans |
+| `SKETCH_OCR` | `off` | `text_recognition` / `rich_layout_recognition`: DeepSeek Files API text layer for hand sketches |
 
 ## API
 
@@ -101,6 +103,7 @@ All settings live in `.env` (see [.env.example](.env.example)). The most importa
 | `POST` | `/api/jobs` | upload a PDF (`file`) → `202 {job_id, status}` |
 | `POST` | `/api/jobs/from-dxf` · `/from-step` · `/from-sketch` | layered DXF · STEP model · photo of the sketch template |
 | `GET` | `/api/templates/sketch-a4.pdf` | printable A4 sketch template (4 ArUco markers, first-angle boxes) |
+| `GET` | `/api/drawing-engines` | drawing engines behind the `DrawingEngine` protocol (`builtin`; draftwright / FreeCAD not wired) |
 | `GET` | `/api/jobs` · `/api/jobs/{id}` | list · full state (`part_spec`, `dfm_report`, `iteration_logs`, artifact URLs) |
 | `GET` | `/api/jobs/{id}/events` | Server-Sent Events: `parsing_pdf` → … → `ready` / `failed` |
 | `PATCH` | `/api/jobs/{id}/spec` | operator edit → deterministic rebuild in ~1 s, no LLM call |
@@ -108,6 +111,20 @@ All settings live in `.env` (see [.env.example](.env.example)). The most importa
 | `POST` | `/api/jobs/{id}/drawing` | (re)generate the EN ISO drawing, optional `sheet_size`, `scale`, `language` |
 | `GET` | `/api/jobs/{id}/artifacts/{name}` | `model.step`, `preview.glb`, `drawing.pdf/.svg/.dxf`, `original.pdf`, `ortho_check.png`, `dfm_report.json` (`?version=n`) |
 | `GET` | `/api/health?deep=true` | OCCT + DeepSeek connectivity |
+
+## Getting good results from customer PDFs
+
+Extraction is most reliable when a drawing meets the intake checklist of [DRAWING_SPEC.md](DRAWING_SPEC.md) §3 route C:
+
+- vector PDF with real, selectable text (not a scan or outlined text)
+- first-angle projection with the projection symbol, one part per sheet, scale stated
+- all dimensions in mm from one datum (bottom-left of the top view), no duplicate dimensions
+- standard ISO callouts (`4x Ø6.6 THRU ⌴Ø11 ↧6.8`, `M8 ↧12`, `Ø10 H7`, `R5`, `1x45°`)
+- a complete title block (part number, material, general tolerance, units, revision)
+- hidden edges dashed, centre lines dash-dot
+
+For your own parts, a layered DXF or the A4 sketch template is better than a PDF; for parts drawn in 3D CAD,
+upload the STEP itself.
 
 ## Tests
 

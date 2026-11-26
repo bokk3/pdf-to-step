@@ -21,7 +21,7 @@ import numpy as np
 from app.services.sketch_template import ARUCO_DICT, LAYOUT, MARKERS, PAGE_H, PAGE_W, marker_corners_mm
 
 PX_PER_MM = 5.0
-SCAN_RATIO = 0.62  # strokes darker than 62 % of the local paper white are kept
+SCAN_RATIO = 0.80  # strokes darker than 80 % of the local paper white (brightest channel) are kept
 MAX_CONFIDENCE = 0.75  # every value read from a hand sketch must be confirmed by the operator
 
 
@@ -94,11 +94,12 @@ def rectify(data: bytes, out_dir: Path) -> SketchResult:
     W, Hh = int(round(PAGE_W * PX_PER_MM)), int(round(PAGE_H * PX_PER_MM))
     flat = cv2.warpPerspective(bgr, H, (W, Hh), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
 
-    # Red channel divided by the local paper white: the light-cyan grid sits at ~0.72 of the paper, graphite and
-    # ink well below 0.6, so one ratio threshold drops the grid under uneven light.
-    red = flat[:, :, 2].astype(np.float32)
-    paper = cv2.GaussianBlur(cv2.dilate(red, np.ones((15, 15), np.uint8)), (0, 0), 12)
-    ratio = red / np.maximum(paper, 1.0)
+    # Brightest channel divided by the local paper white: the light-cyan grid is bright in green / blue (~0.93 of the
+    # paper), grey graphite and ink are dark in every channel, so even faint pencil stays while the grid drops out,
+    # under uneven light too.
+    bright = flat.max(axis=2).astype(np.float32)
+    paper = cv2.GaussianBlur(cv2.dilate(bright, np.ones((15, 15), np.uint8)), (0, 0), 12)
+    ratio = bright / np.maximum(paper, 1.0)
     scan = np.where(ratio < SCAN_RATIO, 0, 255).astype(np.uint8)
 
     out_dir.mkdir(parents=True, exist_ok=True)

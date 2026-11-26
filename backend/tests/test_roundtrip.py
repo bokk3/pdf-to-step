@@ -111,12 +111,14 @@ def test_oracle_roundtrip_through_pipeline_with_ab_report(settings, tmp_path):
             assert s["cases"] >= 1 and s["ready"] == s["cases"], s
             assert s["solid_ok"] == s["bbox_ok"] == s["volume_ok"] == s["cases"]
             assert s["precision"] == 1.0 and s["recall"] == 1.0
-    case = next(iter((root / "cases").iterdir()))
-    for f in ("ground_truth.step", "ground_truth.part_spec.json", "synthetic_iso.pdf", "ground_truth.json"):
+    case = next(p for p in (root / "cases").iterdir() if p.name.startswith("RT"))  # the synthetic part
+    for f in ("ground_truth.step", "ground_truth.part_spec.json", "synthetic_iso.pdf", "ground_truth.json",
+              "predicted_base.step", "predicted_base.part_spec.json", "predicted_strict.step"):
         assert (case / f).exists(), f
     md = (root / "report.md").read_text(encoding="utf-8")
     assert "## Synthetic EN ISO drawings" in md and "## Fixture / workshop PDFs" in md and "Oracle run" in md
     assert "| strict |" in md and "per feature type" in md
+    assert (root / "cases" / "bracket_plate" / "ground_truth.step").exists()  # fixtures get the same layout
 
 
 def test_sketch_photo_fixtures_get_their_own_section(settings, tmp_path):

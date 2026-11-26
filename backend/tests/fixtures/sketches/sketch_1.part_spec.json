@@ -1,0 +1,51 @@
+{
+ "schema_version": "1.1",
+ "input_source": "paper_sketch",
+ "part_name": "Klemplaat K1",
+ "material": "AlMgSi1",
+ "general_tolerance": "ISO 2768-mK",
+ "stock": {
+  "length_x": 120,
+  "width_y": 80,
+  "thickness_z": 15
+ },
+ "outer_profile": {
+  "type": "rectangle"
+ },
+ "features": [
+  {
+   "id": "H1",
+   "type": "hole",
+   "face": "top",
+   "center_x": 10,
+   "center_y": 10,
+   "diameter": 6.6,
+   "through_all": true,
+   "extra_positions": [
+    [
+     110,
+     10
+    ],
+    [
+     10,
+     70
+    ],
+    [
+     110,
+     70
+    ]
+   ]
+  },
+  {
+   "id": "P1",
+   "type": "pocket_rect",
+   "face": "top",
+   "center_x": 60,
+   "center_y": 40,
+   "length_x": 50,
+   "width_y": 30,
+   "corner_radius": 5,
+   "depth": 6
+  }
+ ]
+}

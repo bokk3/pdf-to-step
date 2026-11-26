@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     drawing_enabled: bool = Field(True, description="EN ISO detail drawing (drawing.pdf/.svg/.dxf) per version")
     drawing_owner: str = Field("", description="title block 'owner' field (company name)")
     extraction_prompt_appendix: str = Field("", description="extra extraction instructions (prompt A/B benchmarks)")
+    sketch_ocr: Literal["off", "text_recognition", "rich_layout_recognition"] = Field(
+        "off", description="DeepSeek Files API text layer for hand sketches (DRAWING_SPEC §3 route A experiment)")
+    sketch_ocr_wait_s: float = Field(3.0, ge=0, description="recognition runs asynchronously after the upload")
 
     # --- DFM thresholds (§8) ------------------------------------------------------
     dfm_bbox_tolerance_mm: float = 0.01
