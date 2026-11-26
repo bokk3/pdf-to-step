@@ -95,8 +95,12 @@ def cad_drawing(job_dir: str, version: int, spec_json: str, overrides: dict | No
     return render_drawing(shape, PartSpec.model_validate_json(spec_json), vdir, jd.name, version, owner, overrides)
 
 
-def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, render: bool) -> dict[str, Any]:
-    """Stage 3 + 4: compile, export STEP (with CAM colours) + GLB, run the gate/DFM, optionally render."""
+def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, render: bool,
+              source_step: str | None = None) -> dict[str, Any]:
+    """Stage 3 + 4: compile, export STEP (with CAM colours) + GLB, run the gate/DFM, optionally render.
+
+    With ``source_step`` the geometry is the uploaded STEP (moved to the datum) instead of the compiled spec; the spec
+    then only documents it (DFM, colours, drawing dimensions)."""
     from app.services.cad_compiler import compile_part, export_step_file
     from app.services.cad_sandbox import load_brep, run_build123d_code
     from app.services.verifier import (
@@ -126,7 +130,13 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
         return load_brep(res.brep_path)
 
     try:
-        result = compile_part(spec, complex_runner=complex_runner)
+        if source_step:
+            from app.services.step_ingestor import load_step, to_datum
+
+            shape, statuses, build_warnings = to_datum(load_step(Path(source_step)))[0], [], []
+        else:
+            result = compile_part(spec, complex_runner=complex_runner)
+            shape, statuses, build_warnings = result.shape, result.feature_status, result.warnings
     except Exception as exc:  # noqa: BLE001 - stock/profile errors
         return {"fatal": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc(limit=8)}
     timings["compile"] = time.monotonic() - t0
@@ -138,22 +148,22 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     try:
         colors: dict = {}
         if s.step_face_colors:
-            colors, color_counts = cam_face_colors(result.shape, spec)
-        export_step_file(result.shape, vdir / "model.step", schema=s.step_schema, face_colors=colors or None)
+            colors, color_counts = cam_face_colors(shape, spec)
+        export_step_file(shape, vdir / "model.step", schema=s.step_schema, face_colors=colors or None)
         files["model.step"] = "model.step"
     except Exception as exc:  # noqa: BLE001
         export_errors.append(f"STEP-export mislukt: {exc}")
     timings["step"] = time.monotonic() - t
     t = time.monotonic()
     try:
-        export_glb(result.shape, vdir / "preview.glb")
+        export_glb(shape, vdir / "preview.glb")
         files["preview.glb"] = "preview.glb"
     except Exception as exc:  # noqa: BLE001
         export_errors.append(f"GLB-export mislukt: {exc}")
     timings["glb"] = time.monotonic() - t
 
     t = time.monotonic()
-    report = build_report(spec, version, result.shape, result.feature_status, s, color_counts,
+    report = build_report(spec, version, shape, statuses, s, color_counts,
                           callout_texts=drawing_callout_texts(jd))
     (vdir / "dfm_report.json").write_text(report.model_dump_json(indent=1), encoding="utf-8")
     files["dfm_report.json"] = "dfm_report.json"
@@ -162,7 +172,7 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     if render:
         t = time.monotonic()
         try:
-            for name, p in render_orthographic(result.shape, vdir, title=spec.part_name or "").items():
+            for name, p in render_orthographic(shape, vdir, title=spec.part_name or "").items():
                 files[p.name] = p.name
         except Exception as exc:  # noqa: BLE001
             export_errors.append(f"Ortho-render mislukt: {exc}")
@@ -171,7 +181,7 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     if render and s.drawing_enabled:  # a drawing failure never fails the gate
         t = time.monotonic()
         try:
-            drawing = render_drawing(result.shape, spec, vdir, jd.name, version, s.drawing_owner)
+            drawing = render_drawing(shape, spec, vdir, jd.name, version, s.drawing_owner)
             files.update({n: n for n in DRAWING_FILES})
         except Exception as exc:  # noqa: BLE001
             log.warning("drawing failed for %s v%s: %s", jd.name, version, exc)
@@ -179,7 +189,15 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
         timings["drawing"] = time.monotonic() - t
     timings["total"] = time.monotonic() - t0
     return {"report": report.model_dump(mode="json"), "files": files, "export_errors": export_errors,
-            "warnings": result.warnings, "complex_logs": complex_logs, "timings": timings, "drawing": drawing}
+            "warnings": build_warnings, "complex_logs": complex_logs, "timings": timings, "drawing": drawing}
+
+
+def step_analyze(job_dir: str, name: str) -> dict[str, Any]:
+    """STEP intake: recognise a documentation PartSpec from original.step (see step_ingestor)."""
+    from app.services.step_ingestor import analyze
+
+    _, a = analyze(Path(job_dir) / "original.step", name)
+    return {"spec_json": a.spec.model_dump_json(), "summary": a.summary()}
 
 
 def cad_render(job_dir: str, version: int, title: str, spec_json: str | None = None, owner: str = "") -> dict[str, Any]:
@@ -310,10 +328,20 @@ class Pipeline:
         if self.render_executor:
             self.render_executor.submit(cad_warmup, True).add_done_callback(done)
 
-    async def _cad(self, job_id: str, version: int, spec: PartSpec, render: bool) -> dict[str, Any]:
+    def step_source(self, job_id: str) -> str | None:
+        """original.step when this STEP job's geometry must come from the upload (recognised spec incomplete)."""
+        p = self.job_dir(job_id) / "step_import.json"
+        if not p.exists():
+            return None
+        info = json.loads(p.read_text(encoding="utf-8"))
+        return None if info.get("complete") else str(self.job_dir(job_id) / "original.step")
+
+    async def _cad(self, job_id: str, version: int, spec: PartSpec, render: bool,
+                   from_upload: bool = False) -> dict[str, Any]:
+        src = str(self.job_dir(job_id) / "original.step") if from_upload else self.step_source(job_id)
         try:
             return await self._run_pool(cad_build, str(self.job_dir(job_id)), version, spec.model_dump_json(),
-                                        self.s.model_dump(mode="json"), render)
+                                        self.s.model_dump(mode="json"), render, src)
         except Exception as exc:  # noqa: BLE001
             return {"fatal": f"CAD-worker gecrasht: {type(exc).__name__}: {exc}"}
 
@@ -345,6 +373,16 @@ class Pipeline:
 
     def start_new_job(self, job_id: str, filename: str) -> asyncio.Task:
         return self._spawn(job_id, self._guard(job_id, lambda tr: self._upload_flow(job_id, filename, tr)))
+
+    def start_from_spec(self, job_id: str, spec: PartSpec, source: str, reason: str = "") -> asyncio.Task:
+        """Deterministic intake (DXF, confirmed sketch): no LLM, straight to compile / verify / drawing."""
+        return self._spawn(job_id, self._guard(job_id, lambda tr: self._spec_flow(job_id, spec, source, reason)))
+
+    def start_sketch_job(self, job_id: str, filename: str, upload: str) -> asyncio.Task:
+        return self._spawn(job_id, self._guard(job_id, lambda tr: self._sketch_flow(job_id, filename, upload, tr)))
+
+    def start_step_job(self, job_id: str, filename: str) -> asyncio.Task:
+        return self._spawn(job_id, self._guard(job_id, lambda tr: self._step_flow(job_id, filename)))
 
     def start_reextract(self, job_id: str, hint: str | None) -> asyncio.Task:
         return self._spawn(job_id, self._guard(job_id, lambda tr: self._reextract_flow(job_id, hint, tr)))
@@ -405,7 +443,70 @@ class Pipeline:
             encoding="utf-8")
         await self._extract_and_build(job_id, filename, None, None, trace)
 
+    async def _spec_flow(self, job_id: str, spec: PartSpec, source: str, reason: str,
+                         from_upload: bool = False) -> None:
+        version = self.save_spec(job_id, spec, source=source, reason=reason)
+        await self.emit(job_id, "extracting_features", f"PartSpec v{version} uit {source.upper()}: {len(spec.features)} "
+                        f"features (geen AI)", 0.35, data={"version": version})
+        if spec.blocking_missing:
+            await self._await_dimensions(job_id, version, spec)
+            return
+        await self.emit(job_id, "compiling_cad", f"B-Rep compileren v{version}", 0.5, data={"version": version})
+        result = await self._cad(job_id, version, spec, render=True, from_upload=from_upload)
+        await self.emit(job_id, "verifying", _verify_msg(version, result), 0.85, data={"version": version})
+        await self._finish(job_id, version, result, critic=None)
+
+    async def _step_flow(self, job_id: str, filename: str) -> None:
+        jd = self.job_dir(job_id)
+        await self.emit(job_id, "parsing_pdf", "STEP inlezen en vormelementen herkennen (geen AI)", 0.1)
+        out = await self._run_pool(step_analyze, str(jd), Path(filename).stem)
+        (jd / "step_import.json").write_text(json.dumps(out["summary"], indent=1), encoding="utf-8")
+        spec = PartSpec.model_validate_json(out["spec_json"])
+        summ = out["summary"]
+        await self.emit(job_id, "extracting_features",
+                        f"{len(spec.features)} features herkend; " + ("de PartSpec beschrijft het model volledig"
+                                                                     if summ["complete"] else
+                                                                     "geometrie blijft uit het STEP (niet alles herkend)"),
+                        0.3, data=summ)
+        await self._spec_flow(job_id, spec, "step", "STEP import", from_upload=True)
+
+    async def _sketch_flow(self, job_id: str, filename: str, upload: str, trace: LLMTrace,
+                           hint: str | None = None) -> None:
+        from app.services.sketch_ingestor import cap_confidence, rectify, sheet_pdf
+
+        jd = self.job_dir(job_id)
+        tiles = jd / "tiles"
+        if not (tiles / "sheet.llm.png").exists():
+            await self.emit(job_id, "parsing_pdf", "Schets rechtzetten (ArUco-merkers, perspectiefcorrectie)", 0.05)
+            res = await asyncio.to_thread(rectify, (jd / upload).read_bytes(), tiles)
+            for src, dst in (("sheet.png", "sheet.llm.png"), ("front.png", "tile_front.llm.png"),
+                             ("side.png", "tile_side.llm.png"), ("top.png", "tile_top.llm.png"),
+                             ("title.png", "title_block.llm.png")):
+                shutil.copyfile(tiles / src, tiles / dst)
+            await asyncio.to_thread(sheet_pdf, res.sheet, jd / "original.pdf")
+            (jd / "extraction").mkdir(exist_ok=True)
+            (jd / "extraction" / "digest.json").write_text(json.dumps(
+                {"text": "", "vector": "", "filename": filename, "kind": "sketch",
+                 "markers": res.markers_found, "reprojection_error_px": res.reprojection_error_px}), encoding="utf-8")
+            await self.emit(job_id, "parsing_pdf", f"Schets rechtgezet: 4 merkers, herprojectiefout "
+                            f"{res.reprojection_error_px:.2f} px", 0.12, data={"reprojection_error_px": res.reprojection_error_px})
+        images = self.drawing_images(job_id)
+        model = self.s.deepseek_vision_model if self.llm_is_real else "offline mock"
+        await self.emit(job_id, "extracting_features", f"Schets lezen met {model} (alleen geschreven maten tellen)", 0.2)
+        spec = cap_confidence(await self.llm.extract_sketch_spec(images, trace, filename=filename, hint=hint))
+        version = self.save_spec(job_id, spec, source="sketch", reason=hint or "")
+        await self.emit(job_id, "extracting_features",
+                        f"PartSpec v{version} uit schets: {len(spec.features)} features, alle waarden te controleren "
+                        f"(≤ 75 %), {len(spec.blocking_missing)} ontbrekende maat/maten", 0.35, data={"version": version})
+        if spec.blocking_missing:
+            await self._await_dimensions(job_id, version, spec)
+            return
+        await self._heal_loop(job_id, spec, version, "", images, trace, critic=False)
+
     async def _reextract_flow(self, job_id: str, hint: str | None, trace: LLMTrace) -> None:
+        if self.digest(job_id).get("kind") == "sketch":
+            await self._sketch_flow(job_id, self.digest(job_id).get("filename", ""), "", trace, hint=hint)
+            return
         job = await self.store.get_job(job_id)
         previous = self.load_spec(job_id, job["current_version"]) if job and job["current_version"] else None
         await self._extract_and_build(job_id, (job or {}).get("filename", ""), hint, previous, trace)
@@ -431,7 +532,7 @@ class Pipeline:
         await self._heal_loop(job_id, spec, version, d["text"], images, trace)
 
     async def _heal_loop(self, job_id: str, spec: PartSpec, version: int, digest: str,
-                         images: list[ExtractionImage], trace: LLMTrace) -> None:
+                         images: list[ExtractionImage], trace: LLMTrace, critic: bool = True) -> None:
         """Stages 3-5 with at most ``max_heal_retries`` automatic retries."""
         llm = self.llm_is_real
         attempts = 1 + max(0, self.s.max_heal_retries)
@@ -493,7 +594,7 @@ class Pipeline:
                 break
 
             # gate passed -> visual critic (needs budget left for a correction)
-            if llm and self.s.critic_enabled and it < attempts and "ortho_check.png" in result.get("files", {}):
+            if llm and critic and self.s.critic_enabled and it < attempts and "ortho_check.png" in result.get("files", {}):
                 await self.emit(job_id, "verifying", f"Visuele controle: ortho_check.png v{version} vs. tekening",
                                 base + 0.12)
                 hints = [i["message"] for i in result["report"]["issues"] if i["code"] == "CALLOUT_UNMATCHED"]

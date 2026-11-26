@@ -28,7 +28,14 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import Settings
-from app.schemas.part_spec import Complex3D, PartSpec, Stock, parse_metric_thread, partspec_json_schema
+from app.schemas.part_spec import (
+    Complex3D,
+    MissingDimension,
+    PartSpec,
+    Stock,
+    parse_metric_thread,
+    partspec_json_schema,
+)
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +159,9 @@ class LLMClient(Protocol):
     async def extract_part_spec(self, text_digest: str, vector_digest: str, images: list[ExtractionImage],
                                 trace: LLMTrace, filename: str = "", hint: str | None = None,
                                 previous: PartSpec | None = None) -> PartSpec: ...
+
+    async def extract_sketch_spec(self, images: list[ExtractionImage], trace: LLMTrace, filename: str = "",
+                                  hint: str | None = None) -> PartSpec: ...
 
     async def correct_spec(self, spec: PartSpec, problems: list[str], text_digest: str,
                            images: list[ExtractionImage], trace: LLMTrace) -> PartSpec: ...
@@ -424,6 +434,45 @@ class DeepSeekClient:
                                 thinking=self.s.deepseek_thinking)
         return post_process(spec)
 
+    async def extract_sketch_spec(self, images: list[ExtractionImage], trace: LLMTrace, filename: str = "",
+                                  hint: str | None = None) -> PartSpec:
+        """DRAWING_SPEC §3 route A: a hand sketch on the ArUco A4 template (rectified sheet + view crops)."""
+        system = (
+            "You read HAND SKETCHES of CNC milling parts drawn on a printed A4 template and convert them into a PartSpec "
+            "JSON object for a deterministic CAD compiler. The template has three first-angle view boxes "
+            "(VOORAANZICHT = front, top-left; ZIJAANZICHT = left side view, top-right; BOVENAANZICHT = top view, "
+            "below the front view), a title block (part name, material, thickness Z, general tolerance) and the "
+            "datum (0,0) printed at the bottom-left corner of the top-view box (X to the right, Y up).\n\n"
+            "SKETCH RULES (strict):\n"
+            "1. Sketches are NOT to scale. Only WRITTEN numbers count; never measure the drawing or derive a value "
+            "from proportions or the grid.\n"
+            "2. Never guess. A value that is not written (thickness Z, a pocket or hole depth, a position, a thread "
+            "size) goes into `missing_dimensions` with `blocking: true`, a Dutch `prompt_nl` question and the JSON "
+            "field path (e.g. `stock.thickness_z`, `features.P1.depth`). Put a harmless placeholder in the field "
+            "itself (1 for a missing thickness or depth) so the JSON validates.\n"
+            "3. Set every `confidence` to at most 0.75: an operator must confirm each value.\n"
+            "4. Coordinates are measured from the printed (0,0). If the sketch uses another origin, convert and add "
+            "an `ambiguities` note.\n"
+            "5. Handwriting: read digits carefully (1/7, 3/8, 5/6, decimal comma). If a number is unreadable, treat "
+            "it as missing (rule 2).\n"
+            "6. `input_source` is \"paper_sketch\"; units are mm.\n\n"
+            + CONVENTIONS + self._schema_block())
+        if self.s.extraction_prompt_appendix:
+            system += "\n\nADDITIONAL INSTRUCTIONS:\n" + self.s.extraction_prompt_appendix
+
+        async def build():
+            content = [{"type": "text", "text": f"Sketch file: {filename or '-'}. Images: the rectified sheet, then "
+                                                "crops of the front, side, top and title boxes (grid removed)."}]
+            content += await self._image_parts(images)
+            if hint:
+                content.append({"type": "text", "text": f"OPERATOR HINT (authoritative, may be Dutch): {hint}"})
+            content.append({"type": "text", "text": "Return the PartSpec json now."})
+            return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+
+        spec = await self._json(self.s.deepseek_vision_model, build, "extract_sketch", trace, PartSpec.model_validate,
+                                thinking=self.s.deepseek_thinking)
+        return post_process(spec)
+
     async def correct_spec(self, spec: PartSpec, problems: list[str], text_digest: str,
                            images: list[ExtractionImage], trace: LLMTrace) -> PartSpec:
         """Stage 5 -> Stage 2: fix the PartSpec from kernel errors / critic discrepancies, with the drawing."""
@@ -565,6 +614,17 @@ class MockDeepSeekClient:
                 trace.add("extract", "mock", filename, p.read_text(encoding="utf-8"))
                 return post_process(PartSpec.model_validate_json(p.read_text(encoding="utf-8")))
         return placeholder_spec("DeepSeek is niet geconfigureerd (offline mock)")
+
+    async def extract_sketch_spec(self, images, trace, filename: str = "", hint: str | None = None) -> PartSpec:
+        self.calls.append("extract_sketch")
+        for d in self.fixture_dirs:
+            p = d / f"{Path(filename).stem}.part_spec.json"
+            if p.exists():
+                trace.add("extract_sketch", "mock", filename, p.read_text(encoding="utf-8"))
+                return post_process(PartSpec.model_validate_json(p.read_text(encoding="utf-8")))
+        spec = placeholder_spec("DeepSeek is niet geconfigureerd: vul de schetsmaten handmatig in")
+        return spec.model_copy(update={"missing_dimensions": [MissingDimension(
+            field_path="stock.thickness_z", prompt_nl="Plaatdikte (Z) in mm?", blocking=True)]})
 
     async def correct_spec(self, spec, problems, text_digest, images, trace) -> PartSpec:
         self.calls.append("correct")

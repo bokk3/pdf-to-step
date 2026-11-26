@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import health, jobs
+from app.api import drawings, health, jobs
 from app.config import PROJECT_ROOT, Settings, get_settings
 from app.db import JobStore
 from app.services.deepseek_client import LLMClient, make_client
@@ -56,6 +56,7 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None, u
     app = FastAPI(title="PDF-to-STEP CNC Generator", version="1.0.0", lifespan=lifespan)
     app.include_router(health.router)
     app.include_router(jobs.router)
+    app.include_router(drawings.router)
 
     if FRONTEND_DIST.exists():
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
