@@ -1,0 +1,51 @@
+{
+ "schema_version": "1.0",
+ "default_allowances": {
+  "xy_per_side_mm": 2.0,
+  "z_top_face_mm": 1.0,
+  "z_clamp_margin_mm": 4.0,
+  "saw_length_step_mm": 5.0
+ },
+ "materials": {
+  "aluminum": {
+   "display_name": "AlMgSi1 (6082-T6)",
+   "density_kg_m3": 2700,
+   "standard_flat_bars_mm": [
+    [20, 10], [30, 10], [40, 10], [40, 20], [50, 10], [50, 20], [60, 20], [80, 20], [100, 20], [100, 25],
+    [120, 25], [150, 30], [200, 25], [200, 40]
+   ],
+   "standard_plate_thicknesses_mm": [5, 8, 10, 12, 15, 20, 25, 30, 35, 40, 50, 60, 80, 100]
+  },
+  "steel": {
+   "display_name": "S355J2 / C45",
+   "density_kg_m3": 7850,
+   "standard_flat_bars_mm": [
+    [20, 10], [30, 10], [40, 10], [50, 10], [50, 20], [60, 20], [80, 20], [100, 20], [100, 25], [120, 30],
+    [150, 30]
+   ],
+   "standard_plate_thicknesses_mm": [5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50]
+  },
+  "stainless": {
+   "display_name": "RVS 304 (1.4301)",
+   "density_kg_m3": 7900,
+   "standard_flat_bars_mm": [
+    [20, 10], [30, 10], [40, 10], [50, 10], [50, 20], [60, 20], [80, 20], [100, 20]
+   ],
+   "standard_plate_thicknesses_mm": [5, 6, 8, 10, 12, 15, 20, 25, 30]
+  },
+  "plastic": {
+   "display_name": "POM-C",
+   "density_kg_m3": 1410,
+   "standard_flat_bars_mm": [],
+   "standard_plate_thicknesses_mm": [5, 8, 10, 12, 15, 20, 25, 30, 40, 50, 60, 80, 100]
+  },
+  "brass_copper": {
+   "display_name": "CuZn39Pb3 (CW614N)",
+   "density_kg_m3": 8470,
+   "standard_flat_bars_mm": [
+    [20, 5], [20, 10], [30, 10], [40, 10], [50, 10], [50, 20], [60, 20]
+   ],
+   "standard_plate_thicknesses_mm": [5, 8, 10, 12, 15, 20, 25, 30]
+  }
+ }
+}
