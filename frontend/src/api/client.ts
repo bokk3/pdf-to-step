@@ -56,16 +56,34 @@ export function validationLines(e: unknown): string[] {
   return [e instanceof Error ? e.message : String(e)]
 }
 
+export type UploadKind = 'pdf' | 'dxf' | 'step' | 'sketch'
+const UPLOAD_ENDPOINT: Record<UploadKind, string> = {
+  pdf: '/api/jobs',
+  dxf: '/api/jobs/from-dxf',
+  step: '/api/jobs/from-step',
+  sketch: '/api/jobs/from-sketch',
+}
+
+export function uploadKind(file: File): UploadKind | null {
+  const n = file.name.toLowerCase()
+  if (n.endsWith('.pdf') || file.type === 'application/pdf') return 'pdf'
+  if (n.endsWith('.dxf')) return 'dxf'
+  if (n.endsWith('.step') || n.endsWith('.stp')) return 'step'
+  if (/^image\/(jpeg|png|webp)$/.test(file.type) || /\.(jpe?g|png|webp)$/.test(n)) return 'sketch'
+  return null
+}
+
 export const api = {
   health: (deep = false) => request<Health>(`/api/health${deep ? '?deep=true' : ''}`),
   listJobs: () => request<JobSummary[]>('/api/jobs'),
   getJob: (id: string, version?: number | null) =>
     request<JobDetail>(`/api/jobs/${id}${version ? `?version=${version}` : ''}`),
   deleteJob: (id: string) => request<void>(`/api/jobs/${id}`, { method: 'DELETE' }),
-  upload: (file: File) => {
+  /** PDF -> vision pipeline; DXF / STEP -> deterministic intake; photo -> sketch template (DRAWING_SPEC §6). */
+  upload: (file: File, kind: UploadKind = 'pdf') => {
     const fd = new FormData()
     fd.append('file', file)
-    return request<{ job_id: string; status: string; filename: string }>('/api/jobs', { method: 'POST', body: fd })
+    return request<{ job_id: string; status: string; filename: string }>(UPLOAD_ENDPOINT[kind], { method: 'POST', body: fd })
   },
   /** §7 PATCH /spec: deterministic rebuild, no AI call; returns the new version's state. */
   patchSpec: (id: string, spec: PartSpec) =>

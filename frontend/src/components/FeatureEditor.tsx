@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import SpecPreview2D from './SpecPreview2D'
+import { useMediaQuery } from '../hooks/useMediaQuery'
 import { api, validationLines } from '../api/client'
 import type { DFMReport, EdgeTreatment, Feature, FeatureType, JobDetail, PartSpec, XY } from '../types/partSpec'
 import { DATUMS, EDGE_TARGETS, FACES, REVIEW_CONFIDENCE_THRESHOLD, needsReview } from '../types/partSpec'
@@ -166,6 +168,24 @@ export default function FeatureEditor({ jobId, spec, version, report, selectedId
   const [lastBuild, setLastBuild] = useState<string | null>(null)
   const [hint, setHint] = useState('')
   const [showAi, setShowAi] = useState(false)
+  const narrow = useMediaQuery('(max-width: 639px)')
+  const [preview, setPreview] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('pts.preview2d') !== '0'
+    } catch {
+      return true
+    }
+  })
+  const togglePreview = () => {
+    setPreview((p) => {
+      try {
+        localStorage.setItem('pts.preview2d', p ? '0' : '1')
+      } catch {
+        /* private mode */
+      }
+      return !p
+    })
+  }
   const rowRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
   useEffect(() => {
@@ -273,11 +293,18 @@ export default function FeatureEditor({ jobId, spec, version, report, selectedId
           )}
         </span>
         <div className="flex gap-1 normal-case tracking-normal">
+          <button className={`btn ${preview ? 'btn-primary' : ''}`} onClick={togglePreview} aria-pressed={preview}
+            title="Live 2D-voorbeeld (voor- en bovenaanzicht)">2D</button>
           <button className={`btn ${mode === 'table' ? 'btn-primary' : ''}`} onClick={() => switchMode('table')}>Formulier</button>
           <button className={`btn ${mode === 'json' ? 'btn-primary' : ''}`} onClick={() => switchMode('json')}>JSON</button>
         </div>
       </div>
 
+      {preview && mode === 'table' && (
+        <div className="shrink-0 border-b border-slate-800 bg-slate-950/60 px-3 py-2">
+          <SpecPreview2D spec={draft} selectedId={selectedId} onSelect={onSelect} height={narrow ? 170 : 260} />
+        </div>
+      )}
       {mode === 'table' ? (
         <div className="scroll-thin min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain p-3">
           {/* part header */}

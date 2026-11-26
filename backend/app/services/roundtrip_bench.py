@@ -373,7 +373,7 @@ def geometry_diff(gt: dict, pred: dict | None) -> dict[str, Any]:
 @dataclass
 class Case:
     name: str
-    kind: str  # synthetic | fixture
+    kind: str  # synthetic | fixture | sketch (photo of the A4 template)
     pdf: Path
     gt_spec: PartSpec
     gt: dict[str, Any]
@@ -407,11 +407,16 @@ def prepare_synthetic(specs: list[PartSpec], root: Path, oracle_dir: Path) -> li
     return cases
 
 
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp")
+
+
 def prepare_fixtures(fixture_dir: Path, oracle_dir: Path) -> list[Case]:
+    """Fixture PDFs and sketch photos (``X.pdf`` / ``X.jpg`` + ``X.part_spec.json``)."""
     from app.services.cad_compiler import compile_part
 
     cases = []
-    for pdf in sorted(fixture_dir.glob("*.pdf")):
+    files = sorted(p for p in fixture_dir.iterdir() if p.suffix.lower() in (".pdf",) + IMAGE_SUFFIXES)
+    for pdf in files:
         sp = pdf.parent / f"{pdf.stem}.part_spec.json"
         if not sp.exists():
             continue
@@ -419,7 +424,8 @@ def prepare_fixtures(fixture_dir: Path, oracle_dir: Path) -> list[Case]:
         if spec.requires_complex_3d_fallback:
             continue
         shutil.copyfile(sp, oracle_dir / sp.name)
-        cases.append(Case(pdf.stem, "fixture", pdf, spec, shape_metrics(compile_part(spec).shape)))
+        kind = "sketch" if pdf.suffix.lower() in IMAGE_SUFFIXES else "fixture"
+        cases.append(Case(pdf.stem, kind, pdf, spec, shape_metrics(compile_part(spec).shape)))
     return cases
 
 
@@ -463,12 +469,18 @@ async def run_variant(variant: Variant, cases: list[Case], base: Settings, llm_k
 
     async def one(case: Case) -> dict:
         async with sem:
-            job = await store.create_job(f"{case.name}.pdf")
+            fname = f"{case.name}{case.pdf.suffix.lower()}"
+            job = await store.create_job(fname)
             jd = s.jobs_dir / job["id"]
             jd.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(case.pdf, jd / "original.pdf")
             t0 = time.monotonic()
-            await pipe.start_new_job(job["id"], f"{case.name}.pdf")
+            if case.kind == "sketch":
+                upload = f"sketch_upload{case.pdf.suffix.lower()}"
+                shutil.copyfile(case.pdf, jd / upload)
+                await pipe.start_sketch_job(job["id"], fname, upload)
+            else:
+                shutil.copyfile(case.pdf, jd / "original.pdf")
+                await pipe.start_new_job(job["id"], fname)
             dt = time.monotonic() - t0
             job = await store.get_job(job["id"]) or {}
             out: dict[str, Any] = {"case": case.name, "kind": case.kind, "job_id": job.get("id"),
@@ -539,7 +551,10 @@ def render_report(meta: dict, variants: list[Variant], price: tuple[float | None
     if meta["llm"] == "oracle":
         lines += ["> **Oracle run**: the mock client replays the ground-truth PartSpec, so this validates the harness "
                   "(drawing → parse → compile → verify → diff), not the model.", ""]
-    for section, kind in (("Synthetic EN ISO drawings", "synthetic"), ("Fixture / workshop PDFs", "fixture")):
+    sections = [("Synthetic EN ISO drawings", "synthetic"), ("Fixture / workshop PDFs", "fixture")]
+    if any(r["kind"] == "sketch" for v in variants for r in v.results):
+        sections.append(("Hand-sketch photos (A4 template)", "sketch"))
+    for section, kind in sections:
         lines += [f"## {section}", ""]
         rows = []
         for v in variants:
@@ -629,7 +644,7 @@ async def run(args: argparse.Namespace, base: Settings | None = None) -> Path:
         await run_variant(v, cases, base, args.llm, oracle, root, args.concurrency,
                           critic=False if args.no_critic else None)
     meta = {"timestamp": ts, "llm": args.llm, "seed": args.seed, "synthetic": len(specs),
-            "fixtures": sum(c.kind == "fixture" for c in cases), "args": {k: str(v) for k, v in vars(args).items()},
+            "fixtures": sum(c.kind == "fixture" for c in cases), "sketches": sum(c.kind == "sketch" for c in cases), "args": {k: str(v) for k, v in vars(args).items()},
             "vision_model": base.deepseek_vision_model if args.llm == "deepseek" else "mock"}
     md, js = render_report(meta, variants, (args.price_in, args.price_out))
     (root / "report.md").write_text(md, encoding="utf-8")

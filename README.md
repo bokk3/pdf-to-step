@@ -23,6 +23,11 @@ exact analytic geometry; a verifier gates the result on geometry and manufactura
      ──► 5 self-heal (max 3): kernel errors / visual critic findings → corrected PartSpec → rebuild
      ──► 6 operator: PDF and 3D side by side, edit the spec, "Herbereken STEP" (instant, no AI) → download
      ──► + EN ISO detail drawing of every revision (PDF / SVG / DXF), generated from the PartSpec and the B-Rep
+
+ DXF ──► layered DXF (CONTOUR_T20, POCKET_D8, HOLE_THRU, THREAD_M6_D12, SLOT_D6) → PartSpec, zero AI → 3 …
+STEP ──► your own B-Rep, moved to the datum, features recognised for DFM + drawing, zero AI → 4 …
+ 📷  ──► photo of the printed A4 sketch template → ArUco rectification → sketch extraction (written numbers only,
+          confidence ≤ 75 %, missing values asked instead of guessed) → 3 …
 ```
 
 - **No mesh-to-STEP**: every solid is native B-Rep (planes, cylinders, cones), ready for CAM.
@@ -34,9 +39,12 @@ exact analytic geometry; a verifier gates the result on geometry and manufactura
   EN ISO 5457 frame and 7200 title block (EN or EN/NL), general tolerance / edge-break / surface notes, stamped
   `DRAFT` until signed. Vector PDF with selectable text, SVG and layered DXF, A4 or A3 at an ISO 5455 scale, next
   to `model.step` for every revision.
+- **Four ways in**: customer PDFs (vision), layered DXF and STEP (deterministic), and phone photos of a printable
+  A4 sketch template with ArUco markers (`GET /api/templates/sketch-a4.pdf`).
 - **DFM checks**: sharp / small internal corners, hole and pocket depth ratios, thin walls / webs / floors,
   unmatched drawing callouts.
-- **Operator UI** (Dutch): split-screen workstation on desktop, tabbed mobile layout on phones, installable as a PWA.
+- **Operator UI** (Dutch): split-screen workstation on desktop, tabbed mobile layout on phones, installable as a PWA;
+  live 2D front/top preview while editing the spec, camera capture for sketches, missing-dimension questions.
 
 ## Requirements
 
@@ -91,6 +99,8 @@ All settings live in `.env` (see [.env.example](.env.example)). The most importa
 | Method | Endpoint | |
 |---|---|---|
 | `POST` | `/api/jobs` | upload a PDF (`file`) → `202 {job_id, status}` |
+| `POST` | `/api/jobs/from-dxf` · `/from-step` · `/from-sketch` | layered DXF · STEP model · photo of the sketch template |
+| `GET` | `/api/templates/sketch-a4.pdf` | printable A4 sketch template (4 ArUco markers, first-angle boxes) |
 | `GET` | `/api/jobs` · `/api/jobs/{id}` | list · full state (`part_spec`, `dfm_report`, `iteration_logs`, artifact URLs) |
 | `GET` | `/api/jobs/{id}/events` | Server-Sent Events: `parsing_pdf` → … → `ready` / `failed` |
 | `PATCH` | `/api/jobs/{id}/spec` | operator edit → deterministic rebuild in ~1 s, no LLM call |
@@ -102,13 +112,18 @@ All settings live in `.env` (see [.env.example](.env.example)). The most importa
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 78 tests, offline (DeepSeek mocked), ~2-3 min
+cd backend && .venv/bin/python -m pytest        # 98 tests, offline (DeepSeek mocked), ~3-4 min
 python tests/fixtures/make_fixtures.py         # regenerate the sample drawing + expected specs
+
+# round-trip extraction benchmark (DRAWING_SPEC phase 2): synthetic ISO drawings + fixtures -> pipeline -> diff
+python -m app.services.roundtrip_bench --llm oracle --n 5                       # harness only, no API calls
+python -m app.services.roundtrip_bench --llm deepseek --n 10 --thinking enabled,disabled
 ```
 
 Covers every feature type and face/datum mapping with ±0.01 mm assertions, STEP round-trips, XCAF colours,
 all DFM rules, the PDF parser, the sandbox (allow-list, timeout), the ISO drawing layout (first-angle placement,
-no overlapping text, PDF/SVG/DXF content) and the full REST/SSE flow.
+no overlapping text, PDF/SVG/DXF content), the round-trip diff, the DXF parser, ArUco rectification of a tilted
+synthetic photo, STEP feature recognition and the full REST/SSE flow for all four intake routes.
 
 ## Project layout
 
@@ -122,7 +137,11 @@ backend/app/
   services/verifier.py      geometry gate, DFM rules, callout coverage, GLB + ortho renders
   services/iso_template.py  EN ISO sheet model (frame, title block, line types) → PDF / SVG / DXF
   services/drawing_engine.py  HLR views, scale/sheet solver, baseline dimensions, callouts, notes
-  services/pipeline.py      orchestrator (process pool, self-healing loop, PATCH rebuilds)
+  services/dxf_parser.py    layered DXF -> PartSpec (no AI)
+  services/step_ingestor.py STEP import, datum move, feature recognition, completeness check
+  services/sketch_template.py / sketch_ingestor.py  A4 ArUco template, photo rectification + crops
+  services/roundtrip_bench.py  procedural parts -> ISO PDF -> pipeline -> geometric / feature diff
+  services/pipeline.py      orchestrator (process pool, self-healing loop, PATCH rebuilds, intake flows)
   api/                      REST + SSE endpoints
 backend/tests/              pytest suite + fixtures
 frontend/src/               React 19 + TypeScript + Tailwind (PDF viewer, 3D viewer, spec editor, DFM panel)
@@ -139,7 +158,8 @@ scripts/                    service.ps1, start_tailscale.{sh,ps1}, dev.{sh,ps1}
 
 ## Status
 
-Working end to end on 2.5D prismatic milling parts, including EN ISO 2D drawings. Next (see [ROADMAP.md](ROADMAP.md)):
-the v1.1 round-trip extraction benchmark and paper-sketch / DXF / STEP intake, then the v1.5 CAM and shopfloor package.
+Working end to end on 2.5D prismatic milling parts: PDF, DXF, STEP and paper-sketch intake, EN ISO 2D drawings and a
+round-trip extraction benchmark, plus a live 2D preview in the spec editor. Next (see [ROADMAP.md](ROADMAP.md)): the
+v1.5 CAM and shopfloor package.
 
 No license has been chosen yet; until then all rights are reserved by the author.

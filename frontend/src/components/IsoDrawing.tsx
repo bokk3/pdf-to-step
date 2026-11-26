@@ -15,17 +15,20 @@ export function withTick(u: string | undefined, tick: number): string | undefine
   return u ? `${u}${u.includes('?') ? '&' : '?'}t=${tick}` : undefined
 }
 
-export function DrawingSourceToggle({ value, onChange, isoAvailable }: {
+export function DrawingSourceToggle({ value, onChange, isoAvailable, originalAvailable = true }: {
   value: DrawingSource
   onChange: (s: DrawingSource) => void
   isoAvailable: boolean
+  originalAvailable?: boolean
 }) {
   return (
     <div role="radiogroup" aria-label="Weergegeven tekening"
       className="inline-flex rounded-md border border-slate-700 bg-slate-900 p-0.5 normal-case tracking-normal">
       {(['original', 'iso'] as const).map((s) => (
-        <button key={s} type="button" role="radio" aria-checked={value === s} disabled={s === 'iso' && !isoAvailable}
-          title={s === 'iso' && !isoAvailable ? 'Nog geen ISO-tekening voor deze versie' : undefined}
+        <button key={s} type="button" role="radio" aria-checked={value === s}
+          disabled={s === 'iso' ? !isoAvailable : !originalAvailable}
+          title={s === 'iso' && !isoAvailable ? 'Nog geen ISO-tekening voor deze versie'
+            : s === 'original' && !originalAvailable ? 'Geen 2D-origineel (STEP-import)' : undefined}
           className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
             value === s ? 'bg-slate-700 text-slate-100' : 'text-slate-400 hover:text-slate-200'}`}
           onClick={() => onChange(s)}>

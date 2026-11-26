@@ -5,7 +5,7 @@ Each version has its own contract document; this file tracks what is built. Stat
 | Version | Contract | Theme | Status |
 |---|---|---|---|
 | v1.0 | [ARCHITECTURE.md](ARCHITECTURE.md) | PDF → PartSpec → native B-Rep STEP, DFM gate, self-healing, operator UI, Tailscale | ✅ |
-| v1.1 | [DRAWING_SPEC.md](DRAWING_SPEC.md) | EN ISO 2D drawings, round-trip benchmark, sketch / DXF / STEP intake | 🚧 phase 1 done |
+| v1.1 | [DRAWING_SPEC.md](DRAWING_SPEC.md) | EN ISO 2D drawings, round-trip benchmark, sketch / DXF / STEP intake | ✅ (one open experiment, see phase 3) |
 | v1.5 | [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md) | CAM-ready packages: tool library DFM, XCAF colours, stock + setup sheet, QR shopfloor view, batch intake, telemetry | ⏳ after v1.1 |
 | v2.5 | – | self-learning loop on the operator-correction telemetry captured from v1.5 | ⏳ |
 
@@ -21,16 +21,22 @@ repository that file is `DRAWING_SPEC.md`.
   signed. Vector PDF with selectable text, SVG and layered DXF for every built revision and on demand
   (`POST /api/jobs/{id}/drawing`). PartSpec v1.1 (`input_source`, `drawing_metadata`, `missing_dimensions`) with the
   `awaiting_dimensions` gate. UI: "ISO v<n>" button with sheet / scale / language options, Origineel/ISO toggle.
-- ⏳ **Phase 2 — round-trip benchmark.** `roundtrip_bench.py` + `test_roundtrip.py`: procedural PartSpecs →
+- ✅ **Phase 2 — round-trip benchmark.** `roundtrip_bench.py` + `test_roundtrip.py`: procedural PartSpecs →
   ground-truth STEP + synthetic ISO PDF → full pipeline → geometric and order-independent feature diff (valid
   solid, bbox ±0.05 mm, volume < 0.5 %, nearest-neighbour feature matching ±0.10 mm, precision/recall per type),
-  thinking on/off and prompt A/B, real-fixture section, `data/benchmarks/<ts>/report.{md,json}`.
-- ⏳ **Phase 3 — intake fast paths.** `sketch_template.py` (A4, 4 ArUco markers, first-angle boxes, datum, title
+  thinking on/off and prompt A/B, real-fixture section, `data/benchmarks/<ts>/report.{md,json}`. First real run:
+  ARCHITECTURE.md §11.9 (thinking on wins on the fixture PDF; equal on clean synthetic drawings).
+- ✅ **Phase 3 — intake fast paths.** `sketch_template.py` (A4, 4 ArUco markers, first-angle boxes, datum, title
   fields, checklist; `GET /api/templates/sketch-a4.pdf`), `sketch_ingestor.py` (OpenCV homography warp + crops,
   sketch prompt, confidence ≤ 0.75, missing dimensions → `awaiting_dimensions`; `POST /api/jobs/from-sketch`),
   `dxf_parser.py` (layered DXF, zero AI; `from-dxf`), `step_ingestor.py` (direct B-Rep import, DFM, colours,
   drawing; `from-step`). UI: camera capture, "Download Schetssjabloon (A4)", `MissingDimensionsModal`.
-- ⏳ **Phase 4 (optional) — live 2D preview** of the top/front view next to the spec editor.
+  Open: the Files API `text_recognition` comparison on 5 real handwritten sketches (needs the workshop's sketches;
+  the benchmark already accepts `X.jpg` + `X.part_spec.json` fixtures).
+- ✅ **Phase 4 (optional) — live 2D preview.** `SpecPreview2D.tsx`: first-angle front + top view of the PartSpec
+  being edited, drawn client-side in datum mm (patterns expanded like the backend, hidden / bottom features dashed,
+  low-confidence features amber, datum marked). Follows every keystroke; clicking a shape selects its feature.
+  Toggle "2D" in the editor header (remembered per browser).
 
 ## v1.5 — CAM-ready output & shopfloor (SPEC_V1_5_CAM_SHOPFLOOR.md §6)
 
@@ -38,7 +44,7 @@ Starts after v1.1. Streams as defined in the spec:
 
 | Stream | Scope | Status |
 |---|---|---|
-| A | `tooling.py` schemas, `tool_library.py` (tools.json + Fusion 360 / CSV import), material groups, DFM v2 tool checks + `recommended_tools`, `stock_catalog.py` raw-blank solver, `/api/config/tools` + `/api/config/stock` | ⏳ |
+| A | `tooling.py` schemas, `tool_library.py` (tools.json + Fusion 360 / CSV import), material groups, DFM v2 tool checks + `recommended_tools`, `stock_catalog.py` raw-blank solver, `/api/config/tools` + `/api/config/stock` | ⏳ untested WIP parked on branch `feat/v1.5-cam-shopfloor` |
 | B | `step_xcaf_exporter.py` with `cam_colors.json` (threads, fits, counterbore/countersink seats, datum face), STEP re-read test, identical colours in `preview.glb` | ⏳ (threads + fits are coloured since v1.0) |
 | C | `qr_helper.py` (vector QR → `PUBLIC_TAILSCALE_URL/shopfloor/<job>`), QR in the drawing title block, 1-page A4 `setup_sheet.pdf`, `spec_corrections` telemetry + `GET /api/metrics/accuracy` | ⏳ |
 | D | `pdf_splitter.py` + `/api/batches` (bounded concurrency, ZIP export), `/shopfloor/:jobId` read-only tablet view with clipping + colour legend, batch dashboard, tool library page | ⏳ |

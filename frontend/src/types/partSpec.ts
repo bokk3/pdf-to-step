@@ -272,7 +272,7 @@ export interface JobSummary {
 
 export interface SpecVersion {
   version: number
-  source: 'extraction' | 'reextract' | 'self_heal' | 'critic' | 'complex_code' | 'user_edit'
+  source: 'extraction' | 'reextract' | 'self_heal' | 'critic' | 'complex_code' | 'user_edit' | 'dxf' | 'step' | 'sketch'
   reason: string
   created_at: number
 }
@@ -302,6 +302,8 @@ export interface JobDetail extends JobSummary {
   critic: CriticReport | null
   artifacts: Record<string, string> & { tiles?: Record<string, string> }
   drawing?: DrawingInfo | null
+  /** STEP intake: is the recognised PartSpec a complete description (else edits keep the uploaded geometry)? */
+  step_import?: { complete: boolean; offset_mm: number[]; volume_step_mm3: number; volume_spec_mm3: number | null } | null
   duration_s?: number
 }
 

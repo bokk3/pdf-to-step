@@ -42,7 +42,7 @@ async def _require_job(request: Request, job_id: str) -> dict[str, Any]:
 def _artifact_urls(pipeline: Pipeline, job_id: str, version: int | None) -> dict[str, Any]:
     jd = pipeline.job_dir(job_id)
     base = f"/api/jobs/{job_id}/artifacts"
-    urls: dict[str, Any] = {"original.pdf": f"{base}/original.pdf"}
+    urls: dict[str, Any] = {"original.pdf": f"{base}/original.pdf"} if (jd / "original.pdf").exists() else {}
     vdir = jd / "versions" / f"v{version}" if version else None
     if vdir and vdir.exists():
         for name in sorted(VERSIONED):
@@ -79,6 +79,8 @@ def _detail(pipeline: Pipeline, job: dict[str, Any], version: int | None = None)
     out["artifacts"] = _artifact_urls(pipeline, job_id, v)
     dp = pipeline.job_dir(job_id) / "versions" / f"v{v}" / "drawing.json"
     out["drawing"] = json.loads(dp.read_text(encoding="utf-8")) if dp.exists() else None
+    sp = pipeline.job_dir(job_id) / "step_import.json"
+    out["step_import"] = json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else None
     return out
 
 

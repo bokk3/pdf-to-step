@@ -4,6 +4,8 @@ import DfmWarningsPanel from './components/DfmWarningsPanel'
 import FeatureEditor from './components/FeatureEditor'
 import IsoDrawing, { DrawingSourceToggle, withTick, type DrawingSource } from './components/IsoDrawing'
 import JobList from './components/JobList'
+import MissingDimensionsModal from './components/MissingDimensionsModal'
+import StepImportNote from './components/StepImportNote'
 import MobileShell from './components/MobileShell'
 import PdfViewer from './components/PdfViewer'
 import PipelineProgress, { STATUS_LABEL } from './components/PipelineProgress'
@@ -20,6 +22,9 @@ const SOURCE_LABEL: Record<string, string> = {
   critic: 'visuele correctie',
   complex_code: 'fallbackcode',
   user_edit: 'operator',
+  dxf: 'DXF-import',
+  step: 'STEP-import',
+  sketch: 'schets',
 }
 
 function readHashJob(): string | null {
@@ -66,6 +71,15 @@ export default function App() {
     setSelectedFeature(null)
   }, [jobId])
 
+  useEffect(() => { // shared links / back button: #job=<id> selects that job without a reload
+    const onHash = () => {
+      const id = readHashJob()
+      if (id) setJobId((cur) => (cur === id ? cur : id))
+    }
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
+
   useEffect(() => {
     void loadJob()
   }, [loadJob])
@@ -96,8 +110,12 @@ export default function App() {
   const bboxMax = g ? (g.bbox_max_mm.map((v, i) => v - g.bbox_min_mm[i]) as [number, number, number]) : undefined
   const bust = (u?: string) => withTick(u, renderTick)
   const isoUrl = art['drawing.pdf']
-  const pdfUrl = drawingSource === 'iso' && isoUrl ? bust(isoUrl)! : art['original.pdf']
-  const sourceToggle = <DrawingSourceToggle value={isoUrl ? drawingSource : 'original'} onChange={setDrawingSource} isoAvailable={!!isoUrl} />
+  const originalUrl = art['original.pdf']
+  const shown = !originalUrl ? 'iso' : isoUrl ? drawingSource : 'original'
+  const pdfUrl = shown === 'iso' && isoUrl ? bust(isoUrl) : originalUrl
+  const sourceToggle = (
+    <DrawingSourceToggle value={shown} onChange={setDrawingSource} isoAvailable={!!isoUrl} originalAvailable={!!originalUrl} />
+  )
   const onDrawing = () => {
     setRenderTick((t) => t + 1)
     setDrawingSource('iso')
@@ -219,12 +237,20 @@ export default function App() {
               {job.status === 'failed' && job.error && (
                 <div className="rounded-md border border-rose-800 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">{job.error}</div>
               )}
+              <MissingDimensionsModal job={job} onRebuilt={onRebuilt} />
+              {job.step_import && <StepImportNote complete={job.step_import.complete} />}
 
               <PipelineProgress job={job} events={events} live={live} iterations={job.iteration_logs} />
 
               <div className="grid gap-3 xl:grid-cols-2">
                 <div className="h-[55vh] min-h-[320px]">
-                  <PdfViewer url={pdfUrl} header={sourceToggle} />
+                  {pdfUrl ? (
+                    <PdfViewer url={pdfUrl} header={sourceToggle} />
+                  ) : (
+                    <section className="panel flex h-full items-center justify-center p-4 text-sm text-slate-500">
+                      {running ? 'De ISO-tekening wordt gemaakt…' : 'Geen tekening voor deze versie.'}
+                    </section>
+                  )}
                 </div>
                 <div className="h-[55vh] min-h-[320px]">
                   <Step3DViewer glbUrl={art['preview.glb']} orthoUrl={bust(art['ortho_check.png'])} bboxMax={bboxMax}

@@ -315,6 +315,8 @@ agents do not have to rediscover them.
 * Job status = the §7 stage name: `queued → parsing_pdf → extracting_features → compiling_cad → verifying →
   retrying → ready | failed`. `ready` means the §8.1/8.2 gate passed and every feature compiled; DFM warnings
   never block. `GET /api/jobs` exposes `dfm.needs_review` (low confidence, warnings or ambiguities).
+* Job sources besides PDF: DXF, STEP and sketch photos (§11.10); their spec revisions are tagged `dxf`, `step`,
+  `sketch`.
 * `awaiting_dimensions` (PartSpec v1.1, DRAWING_SPEC §5): a spec with a `missing_dimensions` entry that is
   `blocking` pauses the job before any CAD work, after extraction or on `PATCH /spec`. The SSE stream ends (the
   status is terminal until the operator answers), a server restart keeps it, and the next `PATCH /spec` without
@@ -366,7 +368,8 @@ only as a BREP file. The 15 s budget applies to the generated code itself — in
 ### 11.6 Job folder
 ```text
 data/jobs/<job_id>/
-├── original.pdf
+├── original.pdf    (DXF jobs: rendered DXF; sketch jobs: the rectified sheet; STEP jobs: none)
+├── original.dxf | original.step | sketch_upload.<jpg|png|webp>, step_import.json (STEP: offset, completeness)
 ├── extraction/   text_spans.json, vectors.json, summary.json, all_pages_text.json, digest.json
 ├── tiles/        sheet.png, tile_r{0,1}c{0,1}.png, title_block.png (+ *.llm.png sent to the model)
 ├── specs/        part_spec_v<n>.json, history.json (source: extraction|reextract|self_heal|critic|complex_code|user_edit)
@@ -433,7 +436,60 @@ data/jobs/<job_id>/
 * Drawings are rendered on the render worker for every full pipeline build and after every `PATCH /spec`
   (deferred, with the ortho renders); a drawing failure is logged but never fails the gate.
 
-### 11.9 Open items
+### 11.9 Round-trip benchmark (DRAWING_SPEC.md phase 2)
+* `python -m app.services.roundtrip_bench --n 10 --seed 7 --llm deepseek --thinking enabled,disabled
+  [--prompt-variant NAME=FILE] [--no-critic] [--concurrency 2] [--price-in X --price-out Y]` writes
+  `data/benchmarks/<ts>/report.{md,json}` plus every case (ground-truth spec + STEP, `synthetic_iso.pdf`, the
+  pipeline's job folder). `--llm oracle` replays the ground truth through the mock client to test the harness.
+* Procedural parts: random stock / rounded corners / chamfer, optional corner hole pattern (with counterbores), then
+  one feature per grid cell (pockets, circular pockets, slots, through / blind / counterbored / countersunk /
+  threaded / H7 holes). A part is kept only if it compiles, passes the gate and has no thin-wall / web / breakout
+  warning.
+* Diff: one valid solid; bounding box ±0.05 mm; volume < 0.5 %; per feature type greedy nearest-neighbour pairing
+  of placed instances in global XYZ (patterns expanded, through == blind to full depth, ids and order ignored),
+  TP when the centre and every key dimension are within ±0.10 mm; near misses (≤ 3 mm) are listed with the wrong
+  fields. Fixture PDFs and sketch photos (`X.pdf|jpg` + `X.part_spec.json` in `--fixtures`) get their own report
+  sections.
+* First real run (2026-11-26, `deepseek-flash`, critic on, seed 21, 4 synthetic parts + the bracket fixture):
+  synthetic 4/4 ready with exact solids in both modes, P/R 0.95 (one slot read 4 mm short: the model treated
+  dimensions to the arc centres as the slot ends; the extraction prompt now states the convention). The bracket
+  fixture: thinking **on** P/R 1.0 in 260 s, thinking **off** P/R 0.42 (holes misplaced) in 54 s. Thinking stays the
+  default; on clean synthetic drawings the modes tie.
+
+### 11.10 Intake fast paths (DRAWING_SPEC.md phase 3)
+* **DXF** (`POST /api/jobs/from-dxf`, `dxf_parser.py`, zero AI): layers `CONTOUR_T<t>`, `POCKET_D<d>|_THRU`,
+  `HOLE_THRU|_D<d>`, `THREAD_<M6|M8x1>_D<d>|_THRU`, `SLOT_D<d>|_THRU` (case-insensitive, `.` or `,`). Geometry from
+  closed (LW)polylines with bulges, circles, or loose LINE/ARC chains (joined within 1 µm). Recognised loops:
+  (rounded, rotated) rectangles, obround slots, circles, other polygons; inner loops on the contour layer are
+  through cut-outs. Equal holes become one callout with `extra_positions`. Thread layers give the usable thread
+  depth; the drill goes max(2.5 mm, 0.5·d) deeper (through when that reaches the far side). The datum is the
+  contour's bottom-left corner. A `$INSUNITS` header that would make the part larger than 3 m is ignored (read as
+  mm, warning). Missing thickness / depth → blocking `missing_dimensions` → `awaiting_dimensions`.
+* **STEP** (`POST /api/jobs/from-step`, `step_ingestor.py`, zero AI): the solid is moved to the datum (x,y ≥ 0,
+  top face Z0) and recognised into a documentation PartSpec: rounded corners, a uniform top chamfer, holes on all
+  six faces (coaxial stacks → counterbore / countersink / drill tip; a hole starting in a pocket floor counts as
+  entering from that face — "open end" is tested with a point classifier), pocket / slot / circular-pocket /
+  step floors seen from top or bottom, straight-edged free pockets as polygons. Flat-bottomed blind bores ≥ Ø8
+  without a seat are milled circular pockets. Threads are not in a B-Rep: bores at an ISO tap-drill size are listed
+  as questions. The recognised spec is recompiled; when the volume matches within 0.1 % it is **complete** and
+  edits rebuild from the spec, otherwise every rebuild keeps the uploaded geometry and edits only change the
+  documentation (DFM, colours, drawing). The first build always uses the upload itself.
+* **Paper sketch** (`GET /api/templates/sketch-a4.pdf`, `POST /api/jobs/from-sketch`): A4 landscape template with
+  ArUco `DICT_4X4_50` ids 0–3 (18 mm, 8 mm from the corners), first-angle view boxes, datum, title fields and a
+  checklist. The ingestor applies EXIF orientation, finds all four markers (otherwise 422 before a job is made),
+  fits a homography on the 16 marker corners (RANSAC), warps to 5 px/mm and builds a grid-free scan (red channel
+  divided by the local paper white, threshold 0.62 — the cyan grid sits at ~0.72). The model gets the colour sheet
+  and the four box crops with a sketch prompt (only written numbers count, never guess, missing values as
+  blocking questions); every confidence is capped at 0.75. The visual critic is off for sketches (not to scale).
+  The UI asks the questions in a dialog and rebuilds via `PATCH /spec`.
+* Not done yet: the DeepSeek Files API `text_recognition` / `rich_layout_recognition` comparison on 5 real
+  handwritten sketches (DRAWING_SPEC §7 phase 3). The benchmark already runs sketch photos as fixtures; it needs
+  the workshop's sketches.
+
+* **Live 2D preview** (phase 4, `SpecPreview2D.tsx`): the editor draws the draft PartSpec as a first-angle front +
+  top view in the browser (no request), with the same pattern expansion as `positions()`; shapes select features.
+
+### 11.11 Open items
 * Milestone 1: import the generated STEP files into the workshop CAM package (colours, faces, datum) and add 3
   real workshop example JSONs to `backend/tests/fixtures/`.
 * Milestone 2: add 5–10 real workshop PDFs + expected `*.part_spec.json` as the extraction benchmark (the current

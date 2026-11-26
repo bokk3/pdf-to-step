@@ -64,7 +64,9 @@ PARTSPEC CONVENTIONS (mandatory):
   pattern {type "linear", count_x, count_y, pitch_x, pitch_y} or {type "circular", radius, count,
   start_angle_deg} (circular: center = bolt-circle centre), or extra_positions [[x, y], ...].
 - pocket_rect: center, length_x, width_y (before rotation_deg), corner_radius = internal vertical corner radius.
-  pocket_circle: diameter. pocket_polygon: points_2d. slot: start_x/start_y -> end_x/end_y centre line + width.
+  pocket_circle: diameter. pocket_polygon: points_2d. slot: start_x/start_y -> end_x/end_y = the CENTRES of the two end arcs + width.
+  Slot dimensions that end on centre marks / the slot centre line are already arc centres: use them as they are
+  (never subtract the radius). Only when a drawing gives the OVERALL slot length, centre distance = overall - width.
   boss_rect / boss_circle: raised extrusion of height out of the face.
   step_cut: open edge cut-out / shoulder = box x_min..x_max, y_min..y_max (face coords, may extend past the
   stock edge) removed to depth.

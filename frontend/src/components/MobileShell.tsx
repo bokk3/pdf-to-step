@@ -4,6 +4,8 @@ import type { JobDetail, JobSummary, PipelineEvent } from '../types/partSpec'
 import DfmWarningsPanel from './DfmWarningsPanel'
 import FeatureEditor from './FeatureEditor'
 import IsoDrawing from './IsoDrawing'
+import MissingDimensionsModal from './MissingDimensionsModal'
+import StepImportNote from './StepImportNote'
 import JobList from './JobList'
 import PdfViewer from './PdfViewer'
 import PipelineProgress, { STATUS_LABEL } from './PipelineProgress'
@@ -21,7 +23,7 @@ function readHashTab(): Tab {
 
 const SOURCE_LABEL: Record<string, string> = {
   extraction: 'AI-extractie', reextract: 'AI-herextractie', self_heal: 'zelfherstel', critic: 'visuele correctie',
-  complex_code: 'fallbackcode', user_edit: 'operator',
+  complex_code: 'fallbackcode', user_edit: 'operator', dxf: 'DXF-import', step: 'STEP-import', sketch: 'schets',
 }
 
 interface Props {
@@ -44,7 +46,7 @@ interface Props {
   onRebuilt: (d: JobDetail) => void
   onReextract: () => void
   renderTick: number
-  pdfUrl: string
+  pdfUrl?: string
   sourceToggle: ReactNode
   onDrawing: () => void
 }
@@ -176,6 +178,8 @@ export default function MobileShell(p: Props) {
             {job.status === 'failed' && job.error && (
               <div className="rounded-lg border border-rose-800 bg-rose-500/10 p-3 text-sm text-rose-200">{job.error}</div>
             )}
+            <MissingDimensionsModal job={job} onRebuilt={p.onRebuilt} touch />
+            {job.step_import && <StepImportNote complete={job.step_import.complete} />}
 
             {(art['model.step'] || art['drawing.pdf']) && (
               <IsoDrawing variant="card" job={job} running={p.running} tick={p.renderTick} onGenerated={p.onDrawing} />
@@ -188,7 +192,8 @@ export default function MobileShell(p: Props) {
         )}
         {tab === 'drawing' && (
           <div className="h-full p-2">
-            <PdfViewer url={p.pdfUrl} header={p.sourceToggle} />
+            {p.pdfUrl ? <PdfViewer url={p.pdfUrl} header={p.sourceToggle} />
+              : <Empty>{p.running ? 'De ISO-tekening wordt gemaakt…' : 'Geen tekening voor deze versie.'}</Empty>}
           </div>
         )}
         {tab === 'model' && (

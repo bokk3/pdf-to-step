@@ -117,3 +117,19 @@ def test_oracle_roundtrip_through_pipeline_with_ab_report(settings, tmp_path):
     md = (root / "report.md").read_text(encoding="utf-8")
     assert "## Synthetic EN ISO drawings" in md and "## Fixture / workshop PDFs" in md and "Oracle run" in md
     assert "| strict |" in md and "per feature type" in md
+
+
+def test_sketch_photo_fixtures_get_their_own_section(settings, tmp_path):
+    """Drop `X.jpg` + `X.part_spec.json` in the fixture dir: the photo runs through the sketch flow."""
+    from tests.sketch_photo import photo
+
+    fx = tmp_path / "fx"
+    fx.mkdir()
+    (fx / "plate_sketch.jpg").write_bytes(photo())
+    (fx / "plate_sketch.part_spec.json").write_text(load_fixture("section6_example").model_dump_json(), encoding="utf-8")
+    args = rb.parse_args(["--n", "0", "--fixtures", str(fx), "--out", str(tmp_path / "bench")])
+    root = asyncio.run(rb.run(args, settings))
+    report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+    s = report["variants"]["base"]["sketch"]
+    assert s["cases"] == 1 and s["ready"] == 1 and s["recall"] == 1.0
+    assert "## Hand-sketch photos (A4 template)" in (root / "report.md").read_text(encoding="utf-8")
