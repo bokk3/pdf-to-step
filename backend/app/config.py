@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     cad_workers: int = 2
     step_schema: Literal["AP214", "AP242"] = "AP214"
     step_face_colors: bool = Field(True, description="§8.6 colour threaded (blue) / H7 (red) bores via XCAF")
+    drawing_enabled: bool = Field(True, description="EN ISO detail drawing (drawing.pdf/.svg/.dxf) per version")
+    drawing_owner: str = Field("", description="title block 'owner' field (company name)")
 
     # --- DFM thresholds (§8) ------------------------------------------------------
     dfm_bbox_tolerance_mm: float = 0.01

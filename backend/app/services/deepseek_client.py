@@ -193,7 +193,9 @@ def _extract_json(text: str) -> Any:
 
 _NULL_DROP = {"confidence", "rotation_deg", "corner_radius", "extra_positions", "features", "edge_treatments",
               "ambiguities", "outer_profile", "through_all", "face", "datum_origin", "units", "angle_deg",
-              "requires_complex_3d_fallback", "operation", "schema_version"}
+              "requires_complex_3d_fallback", "operation", "schema_version", "input_source", "drawing_metadata",
+              "missing_dimensions", "sheet_size", "scale", "language", "revision", "approval_status", "projection",
+              "surface_finish", "edge_break_note", "drawn_by", "checked_by", "blocking", "prompt_en"}
 
 
 def _strip_nulls(obj: Any) -> Any:

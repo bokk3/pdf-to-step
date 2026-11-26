@@ -1,7 +1,7 @@
 import * as pdfjs from 'pdfjs-dist'
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import workerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerSrc
 
@@ -9,10 +9,12 @@ const MAX_CANVAS_PIXELS = 36_000_000
 
 interface Props {
   url: string
+  /** replaces the "Tekening" title, e.g. an Origineel / ISO toggle */
+  header?: ReactNode
 }
 
 /** Zoom/pan PDF sheet viewer. Ctrl/⌘ + wheel or the buttons zoom; drag to pan. */
-export default function PdfViewer({ url }: Props) {
+export default function PdfViewer({ url, header }: Props) {
   const scroller = useRef<HTMLDivElement>(null)
   const canvas = useRef<HTMLCanvasElement>(null)
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null)
@@ -125,7 +127,7 @@ export default function PdfViewer({ url }: Props) {
   return (
     <section className="panel flex h-full min-h-0 flex-col">
       <div className="panel-title">
-        <span>Tekening</span>
+        {header ?? <span>Tekening</span>}
         <div className="flex items-center gap-1 normal-case tracking-normal">
           {doc && doc.numPages > 1 && (
             <select className="sel-input" value={pageNo} onChange={(e) => setPageNo(Number(e.target.value))}>

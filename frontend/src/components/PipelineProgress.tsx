@@ -15,6 +15,7 @@ export const STATUS_LABEL: Record<string, string> = {
   queued: 'In wachtrij',
   parsing_pdf: 'PDF ontleden',
   extracting_features: 'Features extraheren',
+  awaiting_dimensions: 'Wacht op maten',
   compiling_cad: 'CAD compileren',
   verifying: 'Verifiëren',
   retrying: 'Zelfherstel',
@@ -53,7 +54,8 @@ export default function PipelineProgress({ job, events, live, iterations, compac
   }, [events.length])
 
   const states = stepStates(job, events)
-  const bar = job.status === 'failed' ? 'bg-rose-500' : job.status === 'ready' ? 'bg-emerald-500' : 'bg-sky-500'
+  const bar = job.status === 'failed' ? 'bg-rose-500' : job.status === 'ready' ? 'bg-emerald-500'
+    : job.status === 'awaiting_dimensions' ? 'bg-amber-500' : 'bg-sky-500'
   const aiIterations = iterations.filter((i) => i.iteration !== 'operator')
 
   const log = (

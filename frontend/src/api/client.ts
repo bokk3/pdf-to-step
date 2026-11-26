@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { JobDetail, JobSummary, PartSpec, PipelineEvent } from '../types/partSpec'
+import type { DrawingInfo, DrawingLanguage, JobDetail, JobSummary, PartSpec, PipelineEvent, SheetSize } from '../types/partSpec'
 
 export class ApiError extends Error {
   status: number
@@ -70,6 +70,15 @@ export const api = {
   /** §7 PATCH /spec: deterministic rebuild, no AI call; returns the new version's state. */
   patchSpec: (id: string, spec: PartSpec) =>
     request<JobDetail>(`/api/jobs/${id}/spec`, { method: 'PATCH', body: JSON.stringify(spec) }),
+  /** DRAWING_SPEC §6: (re)generate the EN ISO drawing of the current version, optional overrides. */
+  generateDrawing: (
+    id: string,
+    overrides: { sheet_size?: SheetSize; scale?: string; language?: DrawingLanguage; version?: number } = {},
+  ) =>
+    request<DrawingInfo & { artifacts: Record<string, string> }>(`/api/jobs/${id}/drawing`, {
+      method: 'POST',
+      body: JSON.stringify(overrides),
+    }),
   reextract: (id: string, hint: string) =>
     request<{ job_id: string; status: string }>(`/api/jobs/${id}/reextract`, {
       method: 'POST',

@@ -315,6 +315,10 @@ agents do not have to rediscover them.
 * Job status = the §7 stage name: `queued → parsing_pdf → extracting_features → compiling_cad → verifying →
   retrying → ready | failed`. `ready` means the §8.1/8.2 gate passed and every feature compiled; DFM warnings
   never block. `GET /api/jobs` exposes `dfm.needs_review` (low confidence, warnings or ambiguities).
+* `awaiting_dimensions` (PartSpec v1.1, DRAWING_SPEC §5): a spec with a `missing_dimensions` entry that is
+  `blocking` pauses the job before any CAD work, after extraction or on `PATCH /spec`. The SSE stream ends (the
+  status is terminal until the operator answers), a server restart keeps it, and the next `PATCH /spec` without
+  blocking entries builds normally. The event carries the missing fields in `data.missing`.
 * Stage 5 routing: kernel/gate failures → `correct_spec` on `DEEPSEEK_VISION_MODEL` **with the drawing**
   (Stage 2); `complex_3d` sandbox failures → `DEEPSEEK_CODE_MODEL` regenerates the code (Stage 3). Max 1 + 3
   builds. The critic must quote text-layer **evidence** and mark findings `major|minor`; only evidence-backed
@@ -328,6 +332,8 @@ agents do not have to rediscover them.
   with a `verifying` SSE event. It never calls the LLM; a `complex_3d` feature without code is reported as a
   failed feature (use `/reextract`).
 * `POST /reextract {hint}` re-runs Stage 2 with the current (possibly operator-corrected) spec plus the hint.
+* `POST /api/jobs/{id}/drawing {sheet_size?, scale?, language?, engine?: "builtin", version?}` regenerates the EN ISO
+  drawing of a built revision from its STEP (≈2–3 s) and promotes it when that revision is current.
 * Extra endpoints: `GET /api/health[?deep=true]`, `GET /api/jobs/{id}?version=n`, `GET /api/jobs/{id}/spec?version=n`,
   `GET /api/jobs/{id}/events/history`, `DELETE /api/jobs/{id}`, `GET /api/schema/part_spec`.
   `GET /artifacts/{filename}` also accepts `?version=n`, `ortho_<view>.png` and `tiles/<name>.png`.
@@ -364,8 +370,9 @@ data/jobs/<job_id>/
 ├── extraction/   text_spans.json, vectors.json, summary.json, all_pages_text.json, digest.json
 ├── tiles/        sheet.png, tile_r{0,1}c{0,1}.png, title_block.png (+ *.llm.png sent to the model)
 ├── specs/        part_spec_v<n>.json, history.json (source: extraction|reextract|self_heal|critic|complex_code|user_edit)
-├── versions/v<n>/ model.step, preview.glb, ortho_check.png, ortho_<view>.png, dfm_report.json, complex/
-├── model.step, preview.glb, ortho_check.png, dfm_report.json   (= current version)
+├── versions/v<n>/ model.step, preview.glb, ortho_check.png, ortho_<view>.png, dfm_report.json, complex/,
+│                 drawing.pdf, drawing.svg, drawing.dxf, drawing.json (sheet, scale, warnings, overrides)
+├── model.step, preview.glb, ortho_check.png, dfm_report.json, drawing.*   (= current version)
 ├── iteration_logs.json
 └── llm/          trace_*.json (every request/response + token usage), file_ids.json
 ```
@@ -388,6 +395,10 @@ data/jobs/<job_id>/
   `https://<machine>.<tailnet>:8445/api/health` end-to-end (re-applies the mapping once on failure).
   `install` registers the task "PDF-to-STEP service" (at sign-in + every 5 min, runs `ensure`), independent of any
   other autostart on the machine. Also `status`, `stop`, `restart`, `uninstall`.
+  The API is started through a hidden launcher PowerShell (`Start-Process` without redirection = ShellExecute), so
+  uvicorn inherits none of the caller's handles: `ensure`/`restart` return as soon as the API is healthy instead of
+  keeping the calling terminal (or remote shell) attached, and the API does not depend on that shell.
+  (`Win32_Process.Create` was tried and rejected: its environment breaks the venv's python launcher.)
   Logs: `logs/service.log`, `logs/api.{out,err}.log`. `scripts/start_tailscale.ps1` delegates to `service.ps1 ensure`.
 * Windows equivalents: `scripts/dev.ps1`, `scripts/start_tailscale.ps1`. If `PYTHONDONTWRITEBYTECODE` is set,
   precompile the venv once (`python -m compileall .venv/Lib/site-packages`): PyMuPDF otherwise recompiles
@@ -399,10 +410,34 @@ data/jobs/<job_id>/
   button is ≥ 44 px and form fields use 16 px text (no iOS focus zoom); the drawing supports pinch-zoom. The app
   ships a web manifest so it can be added to the home screen.
 
-### 11.8 Open items
+### 11.8 EN ISO drawing engine (DRAWING_SPEC.md phase 1)
+* `iso_template.py` holds one primitive sheet model (strokes, fills, text in sheet mm, y down) that renders to
+  **PDF via PyMuPDF** (embedded DejaVu Sans, real selectable text; no Cairo/WeasyPrint system libraries needed on
+  Windows), **SVG** (one `<g id>` per layer) and **DXF** (ezdxf R2018, layers + DASHED/CENTER linetypes, y flipped).
+  `DRAWING_FONT` overrides the font. EN ISO 128-2 line groups 0.35/0.18 (A4) and 0.5/0.25 (A3), lettering
+  3.5 mm (dimensions) / 2.5 mm (notes), EN ISO 5457 frame with 20 mm binding margin, centring marks and grid zones,
+  EN ISO 7200 title block 180 mm wide with the first-angle symbol.
+* `drawing_engine.py`: build123d `project_to_viewport` HLR for front (x,z), top (x,y), left (−y,z) and an isometric
+  view, placed first-angle (top below front, left view right of front). Sheet/scale solver: largest ISO 5455 scale
+  that fits; A4 landscape unless the scale would drop below 1:2 or there are more than 12 features, then A3.
+  Gutters are sized from the actual dimension stacks (incl. the text of short dimensions that sits outside the
+  extension lines); two neighbouring views share the gap between them (min 25 mm).
+* Dimensioning: EN ISO 129-1 baseline dimensions from the datum (first line 10 mm from the view, 8 mm stagger),
+  one dimension per unique coordinate per view/axis; depths as reference dimensions `(d)` on the front view.
+  Callouts per feature group (`4x Ø6.6 THRU` / `CBORE Ø11 ↧6.8`, `2x M6x1 ↧12` / `Ø5 ↧15`, `POCKET 50x30 R5 ↧6`,
+  `SLOT 8 ↧4`, `4x R6`, `1x45°`). DejaVu Sans has no ⌴/⌵ glyphs, so counterbore/countersink are written
+  `CBORE`/`CSK` unless `DRAWING_FONT` provides them. Leaders try the anchor and all pattern instances at several
+  angles/lengths and may not cross text; a callout that cannot be placed becomes a numbered balloon + note.
+* The generated PDF parses back through `pdf_parser.py`; the ISO 5457 grid labels in the margin are tagged
+  `sheet_grid` and left out of the LLM digest so they are never read as dimensions.
+* Drawings are rendered on the render worker for every full pipeline build and after every `PATCH /spec`
+  (deferred, with the ortho renders); a drawing failure is logged but never fails the gate.
+
+### 11.9 Open items
 * Milestone 1: import the generated STEP files into the workshop CAM package (colours, faces, datum) and add 3
   real workshop example JSONs to `backend/tests/fixtures/`.
 * Milestone 2: add 5–10 real workshop PDFs + expected `*.part_spec.json` as the extraction benchmark (the current
   fixtures are a synthetic bracket and the §6 example).
 * Tailscale ACLs (`tag:cnc-workstation` → `group:werkplaats`) are a tailnet admin task.
 * Turned parts (cylindrical stock, lathe features) are outside the v1 contract.
+* Roadmap for v1.1 phases 2–4 and v1.5: see [ROADMAP.md](ROADMAP.md).

@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 
-TERMINAL_STATUSES = {"ready", "failed"}
+TERMINAL_STATUSES = {"ready", "failed", "awaiting_dimensions"}  # awaiting_dimensions survives restarts
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -59,7 +59,7 @@ class JobStore:
         async with self._connect() as db:
             cur = await db.execute(
                 "UPDATE jobs SET status='failed', stage='failed', error='server herstart tijdens verwerking', "
-                "updated_at=? WHERE status NOT IN ('ready','failed')",
+                "updated_at=? WHERE status NOT IN ('ready','failed','awaiting_dimensions')",
                 (time.time(),),
             )
             await db.commit()

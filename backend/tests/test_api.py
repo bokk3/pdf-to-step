@@ -156,3 +156,67 @@ def test_reextract_with_hint_and_complex_fallback(client, fixtures_dir: Path, mo
 
     assert client.delete(f"/api/jobs/{job_id}").status_code == 204
     assert client.get(f"/api/jobs/{job_id}").status_code == 404
+
+
+def test_iso_drawing_per_version_and_overrides(client, fixtures_dir: Path, settings):
+    """DRAWING_SPEC §6/§7: drawing.pdf/.svg/.dxf next to model.step for every revision, regenerable with overrides."""
+    import pymupdf
+
+    job_id = upload(client, fixtures_dir)
+    job = wait_terminal(client, job_id)
+    jd = settings.jobs_dir / job_id
+    for rel in ("versions/v1/drawing.pdf", "versions/v1/drawing.svg", "versions/v1/drawing.dxf",
+                "versions/v1/drawing.json", "drawing.pdf"):
+        assert (jd / rel).exists(), rel
+    assert job["drawing"]["sheet_size"] == "A3_LANDSCAPE" and job["drawing"]["scale"] == "1:1"
+    assert not job["drawing"]["warnings"]
+    assert job["artifacts"]["drawing.pdf"].endswith("?version=1")
+
+    pdf = client.get(f"/api/jobs/{job_id}/artifacts/drawing.pdf")
+    assert pdf.content[:5] == b"%PDF-" and pdf.headers["content-type"] == "application/pdf"
+    assert pdf.headers["content-disposition"].startswith("inline") and "bracket_plate_v1_ISO.pdf" in \
+        pdf.headers["content-disposition"]
+    dxf = client.get(f"/api/jobs/{job_id}/artifacts/drawing.dxf")
+    assert dxf.headers["content-disposition"].startswith("attachment") and b"SECTION" in dxf.content[:200]
+
+    r = client.post(f"/api/jobs/{job_id}/drawing", json={"sheet_size": "A3_LANDSCAPE", "scale": "1:2",
+                                                         "language": "EN_NL"})
+    assert r.status_code == 200, r.text
+    assert r.json()["scale"] == "1:2" and r.json()["artifacts"]["drawing.pdf"].endswith("?version=1")
+    with pymupdf.open(jd / "drawing.pdf") as doc:  # promoted: v1 is the current version
+        text = doc[0].get_text()
+    assert "TITLE / BENAMING" in text and "1:2" in text
+    assert client.post(f"/api/jobs/{job_id}/drawing", json={"scale": "half"}).status_code == 422
+    assert client.post(f"/api/jobs/{job_id}/drawing", json={"engine": "freecad"}).status_code == 422
+
+    spec = job["part_spec"]
+    next(f for f in spec["features"] if f["id"] == "P1")["depth"] = 7.0
+    out = client.patch(f"/api/jobs/{job_id}/spec", json=spec).json()
+    assert out["version"] == 2 and out["status"] == "ready"
+    assert wait_file(jd / "versions" / "v2" / "drawing.json")  # follows the instant rebuild in the background
+    assert wait_file(jd / "versions" / "v2" / "drawing.pdf")
+    with pymupdf.open(jd / "versions" / "v2" / "drawing.pdf") as doc:
+        assert "POCKET 50x30 R5 ↧7" in doc[0].get_text()
+
+
+def test_blocking_missing_dimensions_pause_the_job(client, fixtures_dir: Path, settings, mock_llm):
+    """DRAWING_SPEC §5: blocking missing dimensions -> awaiting_dimensions, no CAD until PATCH resolves them."""
+    job_id = upload(client, fixtures_dir)
+    job = wait_terminal(client, job_id)
+    jd = settings.jobs_dir / job_id
+    spec = job["part_spec"]
+    spec["missing_dimensions"] = [{"field_path": "features.P1.depth", "prompt_nl": "Diepte van pocket P1?",
+                                   "suggested_default": 6.0, "blocking": True}]
+    out = client.patch(f"/api/jobs/{job_id}/spec", json=spec).json()
+    assert out["status"] == "awaiting_dimensions" and out["version"] == 2
+    assert not (jd / "versions" / "v2" / "model.step").exists()
+    events = client.get(f"/api/jobs/{job_id}/events/history").json()
+    paused = [e for e in events if e["stage"] == "awaiting_dimensions"]
+    assert paused and paused[-1]["data"]["missing"][0]["field_path"] == "features.P1.depth"
+    with client.stream("GET", f"/api/jobs/{job_id}/events", params={"after": paused[-1]["id"]}) as s:
+        assert "event: end" in "".join(s.iter_text())  # the SSE stream closes while paused
+
+    spec["missing_dimensions"][0]["blocking"] = False  # operator confirmed the value
+    out = client.patch(f"/api/jobs/{job_id}/spec", json=spec).json()
+    assert out["status"] == "ready" and out["version"] == 3
+    assert (jd / "versions" / "v3" / "model.step").exists()

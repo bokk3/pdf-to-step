@@ -6,7 +6,8 @@ a deterministic [build123d](https://github.com/gumyr/build123d) / Open CASCADE c
 exact analytic geometry; a verifier gates the result on geometry and manufacturability before it is marked ready.
 
 > **[ARCHITECTURE.md](ARCHITECTURE.md) is the source of truth** (contract, API, DFM rules). Section 11 records
-> how it was implemented.
+> how it was implemented. Later versions have their own contracts ([DRAWING_SPEC.md](DRAWING_SPEC.md),
+> [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md)); progress is tracked in [ROADMAP.md](ROADMAP.md).
 
 ![pipeline](https://img.shields.io/badge/pipeline-PDF%20%E2%86%92%20PartSpec%20%E2%86%92%20B--Rep%20%E2%86%92%20STEP-0ea5e9)
 ![python](https://img.shields.io/badge/python-3.12-3776ab) ![react](https://img.shields.io/badge/react-19-61dafb)
@@ -21,6 +22,7 @@ exact analytic geometry; a verifier gates the result on geometry and manufactura
      ──► 4 verify: valid single solid, bounding box ±0.01 mm, DFM rules, callout coverage, ortho renders
      ──► 5 self-heal (max 3): kernel errors / visual critic findings → corrected PartSpec → rebuild
      ──► 6 operator: PDF and 3D side by side, edit the spec, "Herbereken STEP" (instant, no AI) → download
+     ──► + EN ISO detail drawing of every revision (PDF / SVG / DXF), generated from the PartSpec and the B-Rep
 ```
 
 - **No mesh-to-STEP**: every solid is native B-Rep (planes, cylinders, cones), ready for CAM.
@@ -28,6 +30,9 @@ exact analytic geometry; a verifier gates the result on geometry and manufactura
 - **Traceable**: every job keeps the original PDF, text/vector dump, tiles, every `PartSpec` revision, STEP, GLB,
   orthographic check renders, DFM report, iteration log and full LLM trace under `data/jobs/<job_id>/`.
 - **CAM-friendly STEP**: threaded bores coloured blue, tight-tolerance bores (H7, …) red via XCAF.
+- **EN ISO 2D drawings**: first-angle views + isometric, baseline dimensions from the datum, ISO callouts,
+  EN ISO 5457 frame and 7200 title block (EN or EN/NL), ISO 2768-mK notes, stamped `DRAFT` until signed.
+  Vector PDF with selectable text, SVG and layered DXF, next to `model.step` for every revision.
 - **DFM checks**: sharp / small internal corners, hole and pocket depth ratios, thin walls / webs / floors,
   unmatched drawing callouts.
 - **Operator UI** (Dutch): split-screen workstation on desktop, tabbed mobile layout on phones, installable as a PWA.
@@ -89,18 +94,20 @@ All settings live in `.env` (see [.env.example](.env.example)). The most importa
 | `GET` | `/api/jobs/{id}/events` | Server-Sent Events: `parsing_pdf` → … → `ready` / `failed` |
 | `PATCH` | `/api/jobs/{id}/spec` | operator edit → deterministic rebuild in ~1 s, no LLM call |
 | `POST` | `/api/jobs/{id}/reextract` | re-run extraction with an optional hint |
-| `GET` | `/api/jobs/{id}/artifacts/{name}` | `model.step`, `preview.glb`, `original.pdf`, `ortho_check.png`, `dfm_report.json` (`?version=n`) |
+| `POST` | `/api/jobs/{id}/drawing` | (re)generate the EN ISO drawing, optional `sheet_size`, `scale`, `language` |
+| `GET` | `/api/jobs/{id}/artifacts/{name}` | `model.step`, `preview.glb`, `drawing.pdf/.svg/.dxf`, `original.pdf`, `ortho_check.png`, `dfm_report.json` (`?version=n`) |
 | `GET` | `/api/health?deep=true` | OCCT + DeepSeek connectivity |
 
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # 67 tests, offline (DeepSeek mocked), ~1-2 min
+cd backend && .venv/bin/python -m pytest        # 78 tests, offline (DeepSeek mocked), ~2-3 min
 python tests/fixtures/make_fixtures.py         # regenerate the sample drawing + expected specs
 ```
 
 Covers every feature type and face/datum mapping with ±0.01 mm assertions, STEP round-trips, XCAF colours,
-all DFM rules, the PDF parser, the sandbox (allow-list, timeout) and the full REST/SSE flow.
+all DFM rules, the PDF parser, the sandbox (allow-list, timeout), the ISO drawing layout (first-angle placement,
+no overlapping text, PDF/SVG/DXF content) and the full REST/SSE flow.
 
 ## Project layout
 
@@ -112,6 +119,8 @@ backend/app/
   services/cad_compiler.py  deterministic build123d compiler + STEP/XCAF export
   services/cad_sandbox.py   subprocess sandbox for LLM-generated build123d code
   services/verifier.py      geometry gate, DFM rules, callout coverage, GLB + ortho renders
+  services/iso_template.py  EN ISO sheet model: frame, title block, line types → PDF / SVG / DXF
+  services/drawing_engine.py  HLR views, scale/sheet solver, dimensions, callouts, layout
   services/pipeline.py      orchestrator (process pool, self-healing loop, PATCH rebuilds)
   api/                      REST + SSE endpoints
 backend/tests/              pytest suite + fixtures
@@ -129,7 +138,7 @@ scripts/                    service.ps1, start_tailscale.{sh,ps1}, dev.{sh,ps1}
 
 ## Status
 
-Working end to end on 2.5D prismatic milling parts. Next: an ISO (EN ISO 128 / 129-1 / 5456-2 / 7200) 2D drawing
-generator from the `PartSpec`, and a round-trip extraction benchmark with real workshop drawings.
+Working end to end on 2.5D prismatic milling parts, including EN ISO 2D drawings. In progress: v1.5 (workshop tool
+library DFM, stock advisor + setup sheet, QR-linked shopfloor view, multi-drawing batches). See [ROADMAP.md](ROADMAP.md).
 
 No license has been chosen yet; until then all rights are reserved by the author.

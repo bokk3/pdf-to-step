@@ -151,13 +151,25 @@ function Start-Api {
         } else { Write-Log 'frontend\dist missing and npm not found: API only' 'WARN' }
     }
 
-    Limit-Log (Join-Path $LogDir 'api.out.log'); Limit-Log (Join-Path $LogDir 'api.err.log')
+    $outLog = Join-Path $LogDir 'api.out.log'; $errLog = Join-Path $LogDir 'api.err.log'
+    Limit-Log $outLog; Limit-Log $errLog
+    # A hidden launcher PowerShell (Start-Process without redirection = ShellExecute, so it inherits none of this
+    # shell's handles) starts uvicorn with redirected logs and exits. The API therefore does not keep the caller's
+    # console/pipes open: terminals, scheduled tasks and remote shells return as soon as the API is healthy.
+    # (Win32_Process.Create was tried: its environment breaks the venv python launcher.)
     $env:PYTHONDONTWRITEBYTECODE = $null  # PyMuPDF/OCCT imports are slow without cached bytecode
-    $p = Start-Process -FilePath $Py -WorkingDirectory (Join-Path $Root 'backend') -WindowStyle Hidden -PassThru `
-        -ArgumentList '-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', "$Port" `
-        -RedirectStandardOutput (Join-Path $LogDir 'api.out.log') -RedirectStandardError (Join-Path $LogDir 'api.err.log')
-    Set-Content -Path $PidFile -Value $p.Id
-    Write-Log "API started (pid $($p.Id)) on $Target, waiting for health"
+    $backend = Join-Path $Root 'backend'
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
+    $inner = "`$p = Start-Process -FilePath '$Py' -WorkingDirectory '$backend' -WindowStyle Hidden -PassThru " +
+        "-ArgumentList '-m','uvicorn','app.main:app','--host','127.0.0.1','--port','$Port' " +
+        "-RedirectStandardOutput '$outLog' -RedirectStandardError '$errLog'; Set-Content -Path '$PidFile' -Value `$p.Id"
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
+    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -WorkingDirectory $backend `
+        -ArgumentList '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $enc
+    $deadline = (Get-Date).AddSeconds(20)
+    while (-not (Test-Path $PidFile) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    $apiPid = if (Test-Path $PidFile) { (Get-Content $PidFile -Raw).Trim() } else { '?' }
+    Write-Log "API started (pid $apiPid) on $Target, waiting for health"
     if (Wait-Api 150) { Write-Log "API healthy on $Target" 'OK'; return $true }
     Write-Log "API did not become healthy; see logs\api.err.log" 'ERROR'
     return $false

@@ -3,6 +3,7 @@ import type { Health } from '../api/client'
 import type { JobDetail, JobSummary, PipelineEvent } from '../types/partSpec'
 import DfmWarningsPanel from './DfmWarningsPanel'
 import FeatureEditor from './FeatureEditor'
+import IsoDrawing from './IsoDrawing'
 import JobList from './JobList'
 import PdfViewer from './PdfViewer'
 import PipelineProgress, { STATUS_LABEL } from './PipelineProgress'
@@ -42,6 +43,10 @@ interface Props {
   onDelete: () => void
   onRebuilt: (d: JobDetail) => void
   onReextract: () => void
+  renderTick: number
+  pdfUrl: string
+  sourceToggle: ReactNode
+  onDrawing: () => void
 }
 
 /** Phone / small-tablet layout: compact top bar, job list as its own screen, one full-height tab at a time. */
@@ -172,6 +177,10 @@ export default function MobileShell(p: Props) {
               <div className="rounded-lg border border-rose-800 bg-rose-500/10 p-3 text-sm text-rose-200">{job.error}</div>
             )}
 
+            {(art['model.step'] || art['drawing.pdf']) && (
+              <IsoDrawing variant="card" job={job} running={p.running} tick={p.renderTick} onGenerated={p.onDrawing} />
+            )}
+
             <PipelineProgress job={job} events={p.events} live={p.live} iterations={job.iteration_logs} compact />
 
             <button className="btn btn-danger w-full" disabled={p.running} onClick={p.onDelete}>Job verwijderen</button>
@@ -179,7 +188,7 @@ export default function MobileShell(p: Props) {
         )}
         {tab === 'drawing' && (
           <div className="h-full p-2">
-            <PdfViewer url={art['original.pdf']} />
+            <PdfViewer url={p.pdfUrl} header={p.sourceToggle} />
           </div>
         )}
         {tab === 'model' && (
@@ -315,12 +324,14 @@ function Tile({ label, sub, value, tone, onClick }: { label: string; sub?: strin
 }
 
 function StatusDot({ status, running }: { status: string; running: boolean }) {
-  const cls = running ? 'animate-pulse bg-sky-400' : status === 'ready' ? 'bg-emerald-400' : status === 'failed' ? 'bg-rose-500' : 'bg-slate-500'
+  const cls = running ? 'animate-pulse bg-sky-400' : status === 'ready' ? 'bg-emerald-400' : status === 'failed' ? 'bg-rose-500'
+    : status === 'awaiting_dimensions' ? 'bg-amber-400' : 'bg-slate-500'
   return <span className={`h-2 w-2 shrink-0 rounded-full ${cls}`} />
 }
 
 function StatusBadge({ status, running }: { status: string; running: boolean }) {
-  const cls = running ? 'bg-sky-500/15 text-sky-200' : status === 'ready' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-rose-500/15 text-rose-300'
+  const cls = running ? 'bg-sky-500/15 text-sky-200' : status === 'ready' ? 'bg-emerald-500/15 text-emerald-300'
+    : status === 'awaiting_dimensions' ? 'bg-amber-500/15 text-amber-200' : 'bg-rose-500/15 text-rose-300'
   return <span className={`shrink-0 rounded-md px-2 py-1 text-xs font-medium ${cls}`}>{STATUS_LABEL[status] ?? status}</span>
 }
 

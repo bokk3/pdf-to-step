@@ -6,11 +6,11 @@ import asyncio
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.db import JobStore
 from app.schemas.part_spec import PartSpec, partspec_json_schema
@@ -19,9 +19,9 @@ from app.services.pipeline import TERMINAL, Pipeline
 router = APIRouter(prefix="/api", tags=["jobs"])
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MEDIA = {".pdf": "application/pdf", ".glb": "model/gltf-binary", ".png": "image/png", ".json": "application/json",
-         ".step": "application/step", ".txt": "text/plain"}
+         ".step": "application/step", ".txt": "text/plain", ".svg": "image/svg+xml", ".dxf": "image/vnd.dxf"}
 VERSIONED = {"model.step", "preview.glb", "ortho_check.png", "ortho_top.png", "ortho_front.png", "ortho_right.png",
-             "ortho_iso.png", "dfm_report.json"}
+             "ortho_iso.png", "dfm_report.json", "drawing.pdf", "drawing.svg", "drawing.dxf", "drawing.json"}
 
 
 def _store(request: Request) -> JobStore:
@@ -77,6 +77,8 @@ def _detail(pipeline: Pipeline, job: dict[str, Any], version: int | None = None)
     out["iteration_logs"] = pipeline.iteration_logs(job_id)
     out["critic"] = (job.get("result") or {}).get("critic")
     out["artifacts"] = _artifact_urls(pipeline, job_id, v)
+    dp = pipeline.job_dir(job_id) / "versions" / f"v{v}" / "drawing.json"
+    out["drawing"] = json.loads(dp.read_text(encoding="utf-8")) if dp.exists() else None
     return out
 
 
@@ -249,7 +251,38 @@ async def get_artifact(request: Request, job_id: str, filename: str, version: in
     if jd not in p.parents or not p.is_file():
         raise HTTPException(404, "artifact not found")
     kwargs: dict[str, Any] = {"media_type": MEDIA.get(p.suffix.lower(), "application/octet-stream")}
-    if filename == "model.step" or download:
-        v = version or job["current_version"]
-        kwargs["filename"] = f"{Path(job['filename']).stem}_v{v}.step" if filename == "model.step" else p.name
+    stem, v = Path(job["filename"]).stem, version or job["current_version"]
+    if filename == "model.step":
+        kwargs["filename"] = f"{stem}_v{v}.step"
+    elif filename in ("drawing.pdf", "drawing.svg", "drawing.dxf"):
+        kwargs["filename"] = f"{stem}_v{v}_ISO{p.suffix}"
+        if not download and p.suffix != ".dxf":  # PDF / SVG open in the browser, with a sensible save-as name
+            kwargs["content_disposition_type"] = "inline"
+    elif download:
+        kwargs["filename"] = p.name
     return FileResponse(p, headers={"Cache-Control": "no-cache"}, **kwargs)
+
+
+class DrawingRequest(BaseModel):
+    """DRAWING_SPEC §6: optional overrides; anything left out comes from part_spec.drawing_metadata."""
+    sheet_size: Literal["AUTO", "A4_LANDSCAPE", "A3_LANDSCAPE"] | None = None
+    scale: str | None = Field(None, pattern=r"^(AUTO|\d+(\.\d+)?:\d+(\.\d+)?)$")
+    language: Literal["EN", "EN_NL"] | None = None
+    engine: Literal["builtin"] = "builtin"
+    version: int | None = None
+
+
+@router.post("/jobs/{job_id}/drawing")
+async def generate_drawing(request: Request, job_id: str, body: DrawingRequest | None = None) -> dict:
+    """(Re)generate the EN ISO detail drawing (PDF/SVG/DXF) of the current (or given) built version."""
+    job = await _require_job(request, job_id)
+    pipeline = _pipeline(request)
+    body = body or DrawingRequest()
+    v = body.version or job["current_version"]
+    if not v or not (pipeline.job_dir(job_id) / "versions" / f"v{v}" / "model.step").exists():
+        raise HTTPException(409, "deze versie heeft nog geen STEP-model")
+    try:
+        info = await pipeline.regenerate_drawing(job_id, v, body.model_dump(exclude={"engine", "version"}))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"tekening mislukt: {type(exc).__name__}: {exc}") from exc
+    return {**info, "artifacts": _artifact_urls(pipeline, job_id, v)}

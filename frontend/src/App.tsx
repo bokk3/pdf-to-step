@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, useJobEvents, type Health } from './api/client'
 import DfmWarningsPanel from './components/DfmWarningsPanel'
 import FeatureEditor from './components/FeatureEditor'
+import IsoDrawing, { DrawingSourceToggle, withTick, type DrawingSource } from './components/IsoDrawing'
 import JobList from './components/JobList'
 import MobileShell from './components/MobileShell'
 import PdfViewer from './components/PdfViewer'
@@ -36,6 +37,7 @@ export default function App() {
   const [selectedFeature, setSelectedFeature] = useState<string | null>(null)
   const [epoch, setEpoch] = useState(0)
   const [renderTick, setRenderTick] = useState(0)
+  const [drawingSource, setDrawingSource] = useState<DrawingSource>('original')
   const refreshTimer = useRef<number | undefined>(undefined)
 
   const loadJobs = useCallback(() => api.listJobs().then(setJobs).catch(() => undefined), [])
@@ -78,7 +80,8 @@ export default function App() {
 
   const onEvent = useCallback(
     (e: PipelineEvent) => {
-      if (e.data && (e.data as { renders?: boolean }).renders) setRenderTick((t) => t + 1) // deferred ortho render
+      const d = e.data as { renders?: boolean; drawing?: unknown } | null
+      if (d && (d.renders || d.drawing)) setRenderTick((t) => t + 1) // deferred ortho render / regenerated drawing
       scheduleRefresh()
     },
     [scheduleRefresh],
@@ -91,7 +94,16 @@ export default function App() {
   const art = job?.artifacts ?? {}
   const g = report?.geometry
   const bboxMax = g ? (g.bbox_max_mm.map((v, i) => v - g.bbox_min_mm[i]) as [number, number, number]) : undefined
-  const bust = (u?: string) => (u ? `${u}${u.includes('?') ? '&' : '?'}t=${renderTick}` : undefined)
+  const bust = (u?: string) => withTick(u, renderTick)
+  const isoUrl = art['drawing.pdf']
+  const pdfUrl = drawingSource === 'iso' && isoUrl ? bust(isoUrl)! : art['original.pdf']
+  const sourceToggle = <DrawingSourceToggle value={isoUrl ? drawingSource : 'original'} onChange={setDrawingSource} isoAvailable={!!isoUrl} />
+  const onDrawing = () => {
+    setRenderTick((t) => t + 1)
+    setDrawingSource('iso')
+    setEpoch((e) => e + 1) // resubscribe: the stream of a finished job has closed, replay shows the new event
+    void loadJob()
+  }
 
   const selectJob = (id: string) => {
     setViewVersion(null)
@@ -130,6 +142,7 @@ export default function App() {
         orthoUrl={bust(art['ortho_check.png'])} bboxMax={bboxMax} floorZ={g?.bbox_min_mm[2] ?? 0}
         onSelectJob={selectJob} onUploaded={onUploaded} onDelete={() => void onDelete()}
         onRebuilt={onRebuilt} onReextract={onReextract}
+        renderTick={renderTick} pdfUrl={pdfUrl} sourceToggle={sourceToggle} onDrawing={onDrawing}
       />
     )
   }
@@ -174,7 +187,7 @@ export default function App() {
             <>
               <div className="flex flex-wrap items-center gap-2">
                 <h2 className="truncate text-base font-semibold text-slate-100">{job.filename}</h2>
-                <span className={`rounded px-1.5 py-0.5 text-[11px] ${running ? 'bg-sky-500/15 text-sky-200' : job.status === 'ready' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-rose-500/15 text-rose-300'}`}>
+                <span className={`rounded px-1.5 py-0.5 text-[11px] ${running ? 'bg-sky-500/15 text-sky-200' : job.status === 'ready' ? 'bg-emerald-500/15 text-emerald-300' : job.status === 'awaiting_dimensions' ? 'bg-amber-500/15 text-amber-200' : 'bg-rose-500/15 text-rose-300'}`}>
                   {STATUS_LABEL[job.status] ?? job.status}
                 </span>
                 {spec?.part_name && <span className="font-mono text-xs text-slate-400">{spec.part_name}</span>}
@@ -187,6 +200,7 @@ export default function App() {
                       ))}
                     </select>
                   )}
+                  <IsoDrawing job={job} running={running} tick={renderTick} onGenerated={onDrawing} />
                   {art['model.step'] && (
                     <a className="btn btn-primary" href={art['model.step']}>
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2}
@@ -210,7 +224,7 @@ export default function App() {
 
               <div className="grid gap-3 xl:grid-cols-2">
                 <div className="h-[55vh] min-h-[320px]">
-                  <PdfViewer url={art['original.pdf']} />
+                  <PdfViewer url={pdfUrl} header={sourceToggle} />
                 </div>
                 <div className="h-[55vh] min-h-[320px]">
                   <Step3DViewer glbUrl={art['preview.glb']} orthoUrl={bust(art['ortho_check.png'])} bboxMax={bboxMax}

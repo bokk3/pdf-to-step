@@ -1,4 +1,4 @@
-// Strict mirror of backend/app/schemas/part_spec.py (PartSpec v1.0, ARCHITECTURE.md §6). Keep in sync.
+// Strict mirror of backend/app/schemas/part_spec.py (PartSpec v1.1, ARCHITECTURE.md §6 + DRAWING_SPEC.md §5). Keep in sync.
 
 export const REVIEW_CONFIDENCE_THRESHOLD = 0.85
 
@@ -156,8 +156,38 @@ export type Feature =
 
 export type FeatureType = Feature['type']
 
+export type InputSource = 'pdf_drawing' | 'paper_sketch' | 'dxf' | 'step' | 'manual'
+export type SheetSize = 'AUTO' | 'A4_LANDSCAPE' | 'A3_LANDSCAPE'
+export type DrawingLanguage = 'EN' | 'EN_NL'
+export const ISO_SCALES = ['5:1', '2:1', '1:1', '1:2', '1:5', '1:10', '1:20', '1:50'] as const
+
+export interface DrawingMetadata {
+  sheet_size: SheetSize
+  projection: 'ISO_FIRST_ANGLE'
+  scale: string // 'AUTO' or 'a:b'
+  language: DrawingLanguage
+  surface_finish: string
+  edge_break_note: string
+  drawing_number?: string | null
+  revision: string
+  drawn_by: string
+  checked_by: string
+  approval_status: 'DRAFT' | 'APPROVED'
+}
+
+export interface MissingDimension {
+  field_path: string
+  prompt_nl: string
+  prompt_en?: string
+  suggested_default?: number | null
+  blocking: boolean
+}
+
 export interface PartSpec {
-  schema_version: '1.0'
+  schema_version: '1.0' | '1.1'
+  input_source?: InputSource | null
+  drawing_metadata?: DrawingMetadata
+  missing_dimensions?: MissingDimension[]
   part_name?: string | null
   units: 'mm'
   material?: string | null
@@ -218,12 +248,13 @@ export type JobStatus =
   | 'queued'
   | 'parsing_pdf'
   | 'extracting_features'
+  | 'awaiting_dimensions'
   | 'compiling_cad'
   | 'verifying'
   | 'retrying'
   | 'ready'
   | 'failed'
-export const TERMINAL: JobStatus[] = ['ready', 'failed']
+export const TERMINAL: JobStatus[] = ['ready', 'failed', 'awaiting_dimensions']
 
 export interface JobSummary {
   job_id: string
@@ -270,6 +301,18 @@ export interface JobDetail extends JobSummary {
   iteration_logs: IterationLog[]
   critic: CriticReport | null
   artifacts: Record<string, string> & { tiles?: Record<string, string> }
+  drawing?: DrawingInfo | null
+  duration_s?: number
+}
+
+/** versions/v<n>/drawing.json (EN ISO detail drawing of that revision). */
+export interface DrawingInfo {
+  version: number
+  sheet_size: Exclude<SheetSize, 'AUTO'>
+  scale: string
+  warnings: string[]
+  balloons: string[]
+  overrides: { sheet_size?: SheetSize; scale?: string; language?: DrawingLanguage }
   duration_s?: number
 }
 

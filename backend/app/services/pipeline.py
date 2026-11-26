@@ -13,8 +13,9 @@
 
 Job folder (data/jobs/<job_id>/):
   original.pdf, extraction/, tiles/, specs/part_spec_v<n>.json + history.json,
-  versions/v<n>/{model.step, preview.glb, ortho_check.png, ortho_<view>.png, dfm_report.json, complex/},
-  model.step / preview.glb / ortho_check.png / dfm_report.json (= current version),
+  versions/v<n>/{model.step, preview.glb, ortho_check.png, ortho_<view>.png, dfm_report.json, complex/,
+                drawing.pdf/.svg/.dxf + drawing.json (EN ISO detail drawing, DRAWING_SPEC.md)},
+  model.step / preview.glb / ortho_check.png / dfm_report.json / drawing.* (= current version),
   iteration_logs.json, llm/ (traces + Files API ids)
 """
 
@@ -38,9 +39,11 @@ from app.services.deepseek_client import ExtractionImage, LLMClient, LLMTrace, M
 
 log = logging.getLogger(__name__)
 
-STAGES = ("queued", "parsing_pdf", "extracting_features", "compiling_cad", "verifying", "retrying", "ready", "failed")
-TERMINAL = ("ready", "failed")
-CURRENT_FILES = ("model.step", "preview.glb", "ortho_check.png", "dfm_report.json")
+STAGES = ("queued", "parsing_pdf", "extracting_features", "awaiting_dimensions", "compiling_cad", "verifying",
+          "retrying", "ready", "failed")
+TERMINAL = ("ready", "failed", "awaiting_dimensions")  # awaiting_dimensions: paused until PATCH /spec
+DRAWING_FILES = ("drawing.pdf", "drawing.svg", "drawing.dxf", "drawing.json")
+CURRENT_FILES = ("model.step", "preview.glb", "ortho_check.png", "dfm_report.json") + DRAWING_FILES
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +66,33 @@ def cad_warmup(render: bool = False) -> float:
         if render:
             render_orthographic(part, Path(tmp))
     return time.monotonic() - t0
+
+
+def render_drawing(shape, spec: PartSpec, vdir: Path, job_id: str, version: int, owner: str = "",
+                   overrides: dict | None = None) -> dict[str, Any]:
+    """EN ISO detail drawing (PDF/SVG/DXF) of one version; meta goes to drawing.json."""
+    from app.services.drawing_engine import generate_drawing
+
+    o = {k: v for k, v in (overrides or {}).items() if v not in (None, "", "AUTO")}
+    t = time.monotonic()
+    res = generate_drawing(spec, shape, vdir, sheet_size=o.get("sheet_size"), scale=o.get("scale"),
+                           language=o.get("language"),
+                           drawing_number=spec.drawing_metadata.drawing_number or f"PTS-{job_id[:8].upper()}",
+                           owner=owner)
+    info = {"version": version, "sheet_size": res.sheet_size, "scale": res.scale, "warnings": res.warnings,
+            "balloons": res.balloons, "overrides": o, "duration_s": round(time.monotonic() - t, 3)}
+    (vdir / "drawing.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
+    return info
+
+
+def cad_drawing(job_dir: str, version: int, spec_json: str, overrides: dict | None, owner: str) -> dict[str, Any]:
+    """(Re)generate the drawing of a built version from its STEP (POST /drawing, deferred renders)."""
+    from build123d import import_step
+
+    jd = Path(job_dir)
+    vdir = jd / "versions" / f"v{version}"
+    shape = import_step(str(vdir / "model.step"))
+    return render_drawing(shape, PartSpec.model_validate_json(spec_json), vdir, jd.name, version, owner, overrides)
 
 
 def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, render: bool) -> dict[str, Any]:
@@ -137,20 +167,38 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
         except Exception as exc:  # noqa: BLE001
             export_errors.append(f"Ortho-render mislukt: {exc}")
         timings["render"] = time.monotonic() - t
+    drawing: dict[str, Any] | None = None
+    if render and s.drawing_enabled:  # a drawing failure never fails the gate
+        t = time.monotonic()
+        try:
+            drawing = render_drawing(result.shape, spec, vdir, jd.name, version, s.drawing_owner)
+            files.update({n: n for n in DRAWING_FILES})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("drawing failed for %s v%s: %s", jd.name, version, exc)
+            drawing = {"error": f"{type(exc).__name__}: {exc}"}
+        timings["drawing"] = time.monotonic() - t
     timings["total"] = time.monotonic() - t0
     return {"report": report.model_dump(mode="json"), "files": files, "export_errors": export_errors,
-            "warnings": result.warnings, "complex_logs": complex_logs, "timings": timings}
+            "warnings": result.warnings, "complex_logs": complex_logs, "timings": timings, "drawing": drawing}
 
 
-def cad_render(job_dir: str, version: int, title: str) -> dict[str, Any]:
-    """Deferred ortho renders for a version that was built without them (PATCH /spec)."""
+def cad_render(job_dir: str, version: int, title: str, spec_json: str | None = None, owner: str = "") -> dict[str, Any]:
+    """Deferred ortho renders (+ drawing when `spec_json` is given) for a version built without them (PATCH /spec)."""
     from build123d import import_step
 
     from app.services.verifier import render_orthographic
 
-    vdir = Path(job_dir) / "versions" / f"v{version}"
+    jd = Path(job_dir)
+    vdir = jd / "versions" / f"v{version}"
     shape = import_step(str(vdir / "model.step"))
-    return {p.name: p.name for p in render_orthographic(shape, vdir, title=title).values()}
+    files = {p.name: p.name for p in render_orthographic(shape, vdir, title=title).values()}
+    if spec_json:
+        try:
+            render_drawing(shape, PartSpec.model_validate_json(spec_json), vdir, jd.name, version, owner)
+            files.update({n: n for n in DRAWING_FILES})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deferred drawing failed for %s v%s: %s", jd.name, version, exc)
+    return files
 
 
 # --------------------------------------------------------------------------- #
@@ -305,12 +353,16 @@ class Pipeline:
         """Stage 6: synchronous deterministic rebuild (no LLM). Returns the new version's result."""
         t0 = time.monotonic()
         version = self.save_spec(job_id, spec, source="user_edit", reason="operator edit (PATCH /spec)")
+        if spec.blocking_missing:
+            await self._await_dimensions(job_id, version, spec)
+            return {"version": version, "status": "awaiting_dimensions", "result": {},
+                    "duration_s": round(time.monotonic() - t0, 3)}
         await self.emit(job_id, "compiling_cad", f"Herberekenen v{version} (operator-wijziging, geen AI)", 0.5,
                         data={"version": version})
         result = await self._cad(job_id, version, spec, render=False)
         status = await self._finish(job_id, version, result, critic=None)
         if "model.step" in result.get("files", {}):
-            self._background(job_id, self._deferred_render(job_id, version, spec.part_name or ""))
+            self._background(job_id, self._deferred_render(job_id, version, spec))
         self._log_iteration(job_id, {"iteration": "operator", "version": version, "source": "user_edit",
                                      "gate_passed": status == "ready", "errors": _errors(result),
                                      "duration_s": round(time.monotonic() - t0, 3), "timings": result.get("timings")})
@@ -373,6 +425,9 @@ class Pipeline:
                         f"PartSpec v{version}: {len(spec.features)} features, {len(spec.edge_treatments)} randbewerkingen, "
                         f"{len(spec.review_items())} te controleren, {len(spec.ambiguities)} onduidelijkheden",
                         0.35, data={"version": version})
+        if spec.blocking_missing:
+            await self._await_dimensions(job_id, version, spec)
+            return
         await self._heal_loop(job_id, spec, version, d["text"], images, trace)
 
     async def _heal_loop(self, job_id: str, spec: PartSpec, version: int, digest: str,
@@ -555,20 +610,48 @@ class Pipeline:
                                  or any(i["severity"] != "info" for i in issues)),
             "critic": critic.model_dump() if critic is not None else None,
             "timings": result.get("timings"),
+            "drawing": result.get("drawing"),
         }
 
-    async def _deferred_render(self, job_id: str, version: int, title: str) -> None:
+    async def _await_dimensions(self, job_id: str, version: int, spec: PartSpec) -> None:
+        """DRAWING_SPEC §5: blocking missing dimensions pause the job before any CAD / drawing work."""
+        missing = spec.blocking_missing
+        await self.store.update_job(job_id, current_version=version, error=None)
+        await self.emit(job_id, "awaiting_dimensions",
+                        f"v{version}: {len(missing)} ontbrekende maat/maten invullen: "
+                        + "; ".join(m.prompt_nl for m in missing)[:600], 0.4,
+                        level="warning", data={"version": version, "missing": [m.model_dump() for m in missing]})
+
+    async def _promote(self, job_id: str, version: int, names: tuple[str, ...]) -> None:
+        """Copy late artifacts of `version` to the job root if it is still the current version."""
+        job = await self.store.get_job(job_id)
+        if not job or job["current_version"] != version:
+            return
+        vdir = self.job_dir(job_id) / "versions" / f"v{version}"
+        for name in names:
+            if (vdir / name).exists():
+                shutil.copyfile(vdir / name, self.job_dir(job_id) / name)
+
+    async def _deferred_render(self, job_id: str, version: int, spec: PartSpec) -> None:
         try:
-            await self._run_pool(cad_render, str(self.job_dir(job_id)), version, title, render=True)
-            job = await self.store.get_job(job_id)
-            if job and job["current_version"] == version and (self.job_dir(job_id) / "versions" / f"v{version}" /
-                                                              "ortho_check.png").exists():
-                shutil.copyfile(self.job_dir(job_id) / "versions" / f"v{version}" / "ortho_check.png",
-                                self.job_dir(job_id) / "ortho_check.png")
-            await self.emit(job_id, "verifying", f"Ortho-aanzichten v{version} bijgewerkt", None, set_status=False,
-                            data={"version": version, "renders": True})
+            spec_json = spec.model_dump_json() if self.s.drawing_enabled else None
+            await self._run_pool(cad_render, str(self.job_dir(job_id)), version, spec.part_name or "", spec_json,
+                                 self.s.drawing_owner, render=True)
+            await self._promote(job_id, version, ("ortho_check.png",) + DRAWING_FILES)
+            await self.emit(job_id, "verifying", f"Ortho-aanzichten en ISO-tekening v{version} bijgewerkt", None,
+                            set_status=False, data={"version": version, "renders": True, "drawing": True})
         except Exception as exc:  # noqa: BLE001
             log.warning("deferred render failed for %s v%s: %s", job_id, version, exc)
+
+    async def regenerate_drawing(self, job_id: str, version: int, overrides: dict[str, Any]) -> dict[str, Any]:
+        """POST /drawing: (re)generate the EN ISO drawing of a built version with optional overrides."""
+        spec = self.load_spec(job_id, version)
+        info = await self._run_pool(cad_drawing, str(self.job_dir(job_id)), version, spec.model_dump_json(),
+                                    overrides, self.s.drawing_owner, render=True)
+        await self._promote(job_id, version, DRAWING_FILES)
+        await self.emit(job_id, "verifying", f"ISO-tekening v{version}: {info['sheet_size'].replace('_LANDSCAPE', '')} "
+                        f"{info['scale']}", None, set_status=False, data={"version": version, "drawing": info})
+        return info
 
     async def _fail(self, job_id: str, message: str, tb: str | None = None) -> None:
         await self.store.update_job(job_id, error=message[:4000])
