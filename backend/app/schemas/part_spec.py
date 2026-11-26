@@ -33,7 +33,7 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 REVIEW_CONFIDENCE_THRESHOLD = 0.85
 
 Face = Literal["top", "bottom", "front", "back", "left", "right"]
@@ -312,12 +312,48 @@ CUT_TYPES = (Hole, PocketRect, PocketCircle, PocketPolygon, Slot, StepCut)
 
 
 # --------------------------------------------------------------------------- #
+# v1.1 extensions (DRAWING_SPEC.md §5) - all optional, v1.0 payloads stay valid
+# --------------------------------------------------------------------------- #
+
+InputSource = Literal["pdf_drawing", "paper_sketch", "dxf", "step", "manual"]
+
+
+class DrawingMetadata(_Model):
+    """Presentation data for the generated EN ISO drawing (never affects geometry)."""
+
+    sheet_size: Literal["AUTO", "A4_LANDSCAPE", "A3_LANDSCAPE"] = "AUTO"
+    projection: Literal["ISO_FIRST_ANGLE"] = "ISO_FIRST_ANGLE"
+    scale: str = Field("AUTO", pattern=r"^(AUTO|\d+(\.\d+)?:\d+(\.\d+)?)$")
+    language: Literal["EN", "EN_NL"] = "EN"
+    surface_finish: str = "Ra 3.2 (ISO 21920-1)"
+    edge_break_note: str = "Break sharp edges 0.2-0.5 mm (ISO 13715)"
+    drawing_number: str | None = None
+    revision: str = "A"
+    drawn_by: str = ""
+    checked_by: str = ""
+    approval_status: Literal["DRAFT", "APPROVED"] = "DRAFT"
+
+
+class MissingDimension(_Model):
+    """A value the source (e.g. a paper sketch) does not contain. Never guessed."""
+
+    field_path: str = Field(description="dotted path into the PartSpec, e.g. 'stock.thickness_z' or 'features.P1.depth'")
+    prompt_nl: str
+    prompt_en: str = ""
+    suggested_default: float | None = None
+    blocking: bool = True
+
+
+# --------------------------------------------------------------------------- #
 # PartSpec
 # --------------------------------------------------------------------------- #
 
 
 class PartSpec(_Model):
-    schema_version: Literal["1.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.0", "1.1"] = SCHEMA_VERSION
+    input_source: InputSource | None = None
+    drawing_metadata: DrawingMetadata = Field(default_factory=DrawingMetadata)
+    missing_dimensions: list[MissingDimension] = Field(default_factory=list)
     part_name: str | None = None
     units: Literal["mm"] = "mm"
     material: str | None = None
@@ -358,6 +394,11 @@ class PartSpec(_Model):
 
     def complex_features(self) -> list[Complex3D]:
         return [f for f in self.features if isinstance(f, Complex3D)]
+
+    @property
+    def blocking_missing(self) -> list[MissingDimension]:
+        """Missing values that must be entered before CAD / drawing compilation may run."""
+        return [m for m in self.missing_dimensions if m.blocking]
 
     def review_items(self) -> list[str]:
         """Ids (or 'stock' / 'outer_profile') with confidence below the review threshold."""
