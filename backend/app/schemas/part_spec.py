@@ -33,6 +33,8 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.tooling import StockRecommendation, ToolAssignment, ToolCheck
+
 SCHEMA_VERSION = "1.1"
 REVIEW_CONFIDENCE_THRESHOLD = 0.85
 
@@ -487,6 +489,11 @@ class DFMReport(_Model):
     review_items: list[str] = Field(default_factory=list)
     colored_faces: dict[str, int] = Field(default_factory=dict, description="STEP XCAF face colours written")
     stats: dict[str, float] = Field(default_factory=dict)
+    # v1.5 DFM v2 (SPEC_V1_5_CAM_SHOPFLOOR.md §3.3) - optional, older reports stay valid
+    material_group: str | None = None
+    tool_checks: list[ToolCheck] = Field(default_factory=list)
+    recommended_tools: list[ToolAssignment] = Field(default_factory=list)
+    stock_recommendation: StockRecommendation | None = None
 
     @property
     def errors(self) -> list[DFMIssue]:
