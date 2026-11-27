@@ -103,8 +103,11 @@ function Model({ url, wireframe, edges, fitTick }: { url: string; wireframe: boo
       const mesh = o as THREE.Mesh
       if (!mesh.isMesh) return
       if (!mesh.geometry.getAttribute('normal')) mesh.geometry.computeVertexNormals()
+      const colors = mesh.geometry.getAttribute('color') as THREE.BufferAttribute | undefined
+      if (colors) srgbToLinear(colors) // CAM colours from model.step (v1.5 §2.2), stored as sRGB bytes
       mesh.material = new THREE.MeshStandardMaterial({
-        color: '#b4c2d0',
+        color: colors ? '#ffffff' : '#b4c2d0',
+        vertexColors: !!colors,
         metalness: 0.15,
         roughness: 0.5,
         side: THREE.DoubleSide,
@@ -163,6 +166,22 @@ function Model({ url, wireframe, edges, fitTick }: { url: string; wireframe: boo
   }, [root, camera, controls, size.width, size.height, fitTick, invalidate])
 
   return <primitive object={root} />
+}
+
+/** glTF COLOR_0 is linear; the exporter writes the palette's sRGB bytes. Convert once so the screen shows the exact
+ *  CAM colour (e.g. royal blue #0066FF). Keeps the original sRGB copy in `userData.srgb` for colour lookups. */
+export function srgbToLinear(attr: THREE.BufferAttribute) {
+  if ((attr as unknown as { __linear?: boolean }).__linear) return
+  const c = new THREE.Color()
+  const srgb = new Float32Array(attr.count * 3)
+  for (let i = 0; i < attr.count; i++) {
+    c.setRGB(attr.getX(i), attr.getY(i), attr.getZ(i), THREE.SRGBColorSpace)
+    srgb.set([attr.getX(i), attr.getY(i), attr.getZ(i)], i * 3)
+    attr.setXYZ(i, c.r, c.g, c.b)
+  }
+  ;(attr as unknown as { __linear?: boolean; srgb?: Float32Array }).__linear = true
+  ;(attr as unknown as { srgb?: Float32Array }).srgb = srgb
+  attr.needsUpdate = true
 }
 
 function Toggle({ on, set, label }: { on: boolean; set: (v: boolean) => void; label: string }) {

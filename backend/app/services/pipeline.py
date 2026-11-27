@@ -111,7 +111,6 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     from app.services.cad_sandbox import load_brep, run_build123d_code
     from app.services.verifier import (
         build_report,
-        cam_face_colors,
         drawing_callout_texts,
         export_glb,
         render_orthographic,
@@ -151,18 +150,27 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     export_errors: list[str] = []
     color_counts: dict[str, int] = {}
     t = time.monotonic()
+    coloring = None
     try:
-        colors: dict = {}
-        if s.step_face_colors:
-            colors, color_counts = cam_face_colors(shape, spec)
-        export_step_file(shape, vdir / "model.step", schema=s.step_schema, face_colors=colors or None)
+        if s.step_face_colors and s.enable_xcaf_cam_colors:  # v1.5 §2.2: AP214 CAM colours from cam_colors.json
+            from app.services.step_xcaf_exporter import classify_faces, export_colored_step, load_palette
+
+            coloring = classify_faces(shape, spec, load_palette(s))
+            color_counts = coloring.counts
+            export_colored_step(shape, vdir / "model.step", coloring, schema=s.step_schema,
+                                name=spec.part_name or "part")
+            (vdir / "cam_colors.json").write_text(json.dumps(
+                {"counts": color_counts, "palette": coloring.palette.model_dump(mode="json")}, indent=1),
+                encoding="utf-8")
+        else:
+            export_step_file(shape, vdir / "model.step", schema=s.step_schema)
         files["model.step"] = "model.step"
     except Exception as exc:  # noqa: BLE001
         export_errors.append(f"STEP-export mislukt: {exc}")
     timings["step"] = time.monotonic() - t
     t = time.monotonic()
     try:
-        export_glb(shape, vdir / "preview.glb")
+        export_glb(shape, vdir / "preview.glb", coloring=coloring)
         files["preview.glb"] = "preview.glb"
     except Exception as exc:  # noqa: BLE001
         export_errors.append(f"GLB-export mislukt: {exc}")

@@ -298,7 +298,8 @@ def test_bracket_fixture_dimensions_and_colors(bracket_spec, tmp_path: Path):
         assert not inside(shape, x, y, -11), (x, y)
     assert not inside(shape, 30, 5, -6) and not inside(shape, 90, 5, -6)  # M6 in the front face
     _, counts = cam_face_colors(shape, bracket_spec)
-    assert counts == {"thread": 2, "tight_tolerance": 1}
+    # v1.5 palette: 2 M6 bores, the Ø10 H7 bore, 4 counterbores (cylinder + floor) + 1 countersink cone, top datum
+    assert counts == {"thread": 2, "tight_fit": 1, "seat": 9, "datum": 1}
 
 
 def test_ap242_schema(tmp_path: Path):
