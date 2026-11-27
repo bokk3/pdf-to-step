@@ -233,6 +233,16 @@ def _feature_box(f, fr, frames):
 
 def export_colored_step(shape, path, coloring: FaceColoring, schema: str = "AP214", name: str = "part"):
     """STEPCAFControl_Writer export: body colour on the solid, CAM colours on matched faces (XCAFDoc_ColorSurf)."""
+    solid = shape.solids()[0] if len(shape.solids()) == 1 else shape
+    body = coloring.body_rgb if coloring.palette is not None else None
+    faces = [(f, coloring.palette.colors[cat].rgb) for f, cat in coloring.faces] if coloring.palette else []
+    return export_bodies_step([(name, solid, body, faces)], path, schema)
+
+
+def export_bodies_step(bodies, path, schema: str = "AP214"):
+    """Several named top-level solids in one AP214 file (softjaws: Fixed_Jaw + Movable_Jaw).
+
+    ``bodies`` = [(name, shape, body_rgb | None, [(build123d Face, rgb), ...]), ...]."""
     from OCP.IFSelect import IFSelect_ReturnStatus
     from OCP.Interface import Interface_Static
     from OCP.Message import Message, Message_Gravity
@@ -257,18 +267,18 @@ def export_colored_step(shape, path, coloring: FaceColoring, schema: str = "AP21
     XCAFDoc_DocumentTool.SetLengthUnit_s(doc, 0.001)  # millimetres
     shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
     color_tool = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
-    solid = shape.solids()[0] if len(shape.solids()) == 1 else shape
-    label = shape_tool.AddShape(solid.wrapped, False)
-    TDataStd_Name.Set_s(label, TCollection_ExtendedString(name))
     # sRGB: OCCT treats TOC_RGB as linear and converts on write; CAM systems read the STEP numbers as sRGB,
     # so sRGB in = the exact palette values (0, 102, 255) in the file.
     rgb = lambda c: Quantity_Color(c[0] / 255, c[1] / 255, c[2] / 255, Quantity_TypeOfColor.Quantity_TOC_sRGB)  # noqa: E731
-    if coloring.palette is not None:
-        color_tool.SetColor(label, rgb(coloring.body_rgb), XCAFDoc_ColorType.XCAFDoc_ColorSurf)
-    for face, cat in coloring.faces:
-        sub = shape_tool.AddSubShape(label, face.wrapped)
-        if not sub.IsNull():
-            color_tool.SetColor(sub, rgb(coloring.palette.colors[cat].rgb), XCAFDoc_ColorType.XCAFDoc_ColorSurf)
+    for name, solid, body_rgb, faces in bodies:
+        label = shape_tool.AddShape(solid.wrapped, False)
+        TDataStd_Name.Set_s(label, TCollection_ExtendedString(name))
+        if body_rgb is not None:
+            color_tool.SetColor(label, rgb(body_rgb), XCAFDoc_ColorType.XCAFDoc_ColorSurf)
+        for face, frgb in faces:
+            sub = shape_tool.AddSubShape(label, face.wrapped)
+            if not sub.IsNull():
+                color_tool.SetColor(sub, rgb(frgb), XCAFDoc_ColorType.XCAFDoc_ColorSurf)
     shape_tool.UpdateAssemblies()
     for printer in Message.DefaultMessenger_s().Printers():  # silence OCCT transfer statistics
         printer.SetTraceLevel(Message_Gravity.Message_Fail)
@@ -328,3 +338,33 @@ def read_step_colors(path) -> tuple[int, list[tuple[int, int, int]]]:
                 colors.append((int(round(r * 255)), int(round(g * 255)), int(round(b * 255))))
             ex.Next()
     return solids, colors
+
+
+def read_step_names(path) -> list[str]:
+    """Names of the top-level shapes in a STEP file (STEPCAFControl_Reader, name mode)."""
+    from OCP.IFSelect import IFSelect_ReturnStatus
+    from OCP.STEPCAFControl import STEPCAFControl_Reader
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.TDataStd import TDataStd_Name
+    from OCP.TDF import TDF_ChildIterator
+    from OCP.TDocStd import TDocStd_Document
+    from OCP.XCAFApp import XCAFApp_Application
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool
+
+    doc = TDocStd_Document(TCollection_ExtendedString("MDTV-XCAF"))
+    XCAFApp_Application.GetApplication_s().InitDocument(doc)
+    reader = STEPCAFControl_Reader()
+    reader.SetNameMode(True)
+    if reader.ReadFile(str(path)) != IFSelect_ReturnStatus.IFSelect_RetDone or not reader.Transfer(doc):
+        raise ValueError(f"cannot read {path}")
+    shape_tool = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    names = []
+    it = TDF_ChildIterator(shape_tool.Label(), False)
+    while it.More():
+        lab = it.Value()
+        if shape_tool.IsTopLevel(lab):
+            attr = TDataStd_Name()
+            if lab.FindAttribute(TDataStd_Name.GetID_s(), attr):
+                names.append(attr.Get().ToExtString())
+        it.Next()
+    return names

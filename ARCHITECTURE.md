@@ -561,7 +561,37 @@ data/jobs/<job_id>/
   the hit point (first intersection on the visible side of the section plane) to the nearest feature anchor of the
   tapped colour category.
 
-### 11.12 Open items
+### 11.12 Multi-side, 3+2, fixturing, revisions, quoting (SPEC_V2_0_MULTISIDE_FIXTURING.md, v2.0)
+* **Two face conventions, one frame module.** `app/schemas/frames.py` (pure numpy; mirrored in
+  `frontend/src/lib/frames.ts`) defines the frames. Schema 2.0 uses the spec's right-handed table (u x v = outward
+  normal, origin on a stock corner); stored v1.0 / v1.1 specs keep the convention they were written in and compile
+  unchanged, so no migration is needed and every v1 test passes untouched. A payload without `schema_version` is
+  read as v1.1 (`upgrade_part_spec`); model answers are always validated as 2.0 (`llm_spec`), and v1 specs are
+  converted (`to_v2_coordinates`, same geometry) before they are shown to the model or diffed.
+* **Tilted planes** (`plane:<id>`): SPATIAL_XYZ = R = Rx(a) Ry(b) Rz(c), local +Z outward, cuts along -Z; through
+  depth = the ray length through the stock. `angled_face_cut` removes the half-space above the plane before the
+  plane's other features. Tilted features skip the 2D edge-wall rule (no bounded face) and are covered by DFM v3.
+* **Setup planner**: normals grouped within 0.1°; the top face is always Op 1, the bottom gets its own setup when it
+  has features or the raw blank is thicker than the part (deck-off). 5-axis 3+2 reaches every direction with
+  n_z >= -0.15 in one clamping. Softjaws are advised when Op 1 destroys the parallel gripping faces.
+* **DFM v3**: cutter volumes clipped to the stock; distance between features of different faces via
+  `BRepExtrema_DistShapeShape`. (0, DFM_MIN_WALL_MM) -> warning; overlapping blind cuts from opposing faces ->
+  error unless `intentional_intersection`; other crossings (cross-drilled holes) -> info.
+* **Softjaws**: the cavity is the union of cross-sections of the grip slice (at every vertex level, midpoints and a
+  1 mm grid), holes filled, offset by the clearance and extruded straight up, so the part always slides out; a raw
+  boolean of the part would leave jaw material in side grooves (tested). Jaw frame: X along the jaws, Y clamping,
+  Z0 on the jaw tops. Blocked configurations still write `softjaw_report.json` (HTTP 422 with the report).
+  Not modelled: alignment keyways / pins of specific jaw systems.
+* **Revision diff**: both solids on the canonical datum (stock min corner X/Y = 0, top Z = 0), exact booleans,
+  fragments < 0.05 mm³ dropped. Features pair per (type, face) by nearest global anchor (<= 25 mm), so ids and order
+  do not matter. Results are cached per (job, version) pair under `data/revisions/<diff_id>/`.
+* **Quoting**: geometry inputs (volumes, machined / fine-finish B-Rep face areas, hole list, unique tools, setup
+  counts) are extracted once per revision in a CAD worker (`quote_inputs.json`); the price math is pure and every
+  breakdown line carries its formula. Load / unload is counted per setup. Unknown material groups fall back to the
+  steel rates with a note. Rates live in `data/config/shop_rates.json` (`/settings/rates`).
+* PDFs are written to a temp file and atomically replaced (a QR scan or download never reads a half-written file).
+
+### 11.13 Open items
 * Milestone 1: import the generated STEP files into the workshop CAM package (colours, faces, datum) and add 3
   real workshop example JSONs to `backend/tests/fixtures/`.
 * Milestone 2: add 5–10 real workshop PDFs + expected `*.part_spec.json` as the extraction benchmark (the current

@@ -58,6 +58,7 @@ from app.schemas.part_spec import (
     PocketRect,
     Slot,
     StepCut,
+    AngledFaceCut,
 )
 
 EPS = 0.05  # tool overshoot (mm) so tools never share a face with the stock
@@ -95,17 +96,17 @@ class FaceFrame:
         return 1.0 if self.normal.cross(self.u_dir).dot(self.v_dir) > 0 else -1.0
 
 
-def face_frames(spec: PartSpec) -> dict[str, FaceFrame]:
-    (x0, y0, z0), (x1, y1, z1) = spec.stock_bbox()
-    return {
-        "top": FaceFrame(Vector(0, 0, z1), X, Y, Z, (x0, x1), (y0, y1), z1 - z0),
-        "bottom": FaceFrame(Vector(0, 0, z0), X, Y, -Z, (x0, x1), (y0, y1), z1 - z0),
-        "front": FaceFrame(Vector(0, y0, 0), X, Z, -Y, (x0, x1), (z0, z1), y1 - y0),
-        "back": FaceFrame(Vector(0, y1, 0), X, Z, Y, (x0, x1), (z0, z1), y1 - y0),
-        "left": FaceFrame(Vector(x0, 0, 0), Y, Z, -X, (y0, y1), (z0, z1), x1 - x0),
-        "right": FaceFrame(Vector(x1, 0, 0), Y, Z, X, (y0, y1), (z0, z1), x1 - x0),
-    }
+def _vec(a) -> Vector:
+    return Vector(float(a[0]), float(a[1]), float(a[2]))
 
+
+def face_frames(spec: PartSpec) -> dict[str, FaceFrame]:
+    """build123d view of ``app.schemas.frames.frames``: 6 stock faces (v1 or v2.0 convention by schema_version)
+    + one frame per tilted plane (key ``plane:<id>``)."""
+    from app.schemas.frames import frames
+
+    return {k: FaceFrame(_vec(fr.origin), _vec(fr.u), _vec(fr.v), _vec(fr.n), fr.u_range, fr.v_range, fr.thickness)
+            for k, fr in frames(spec).items()}
 
 # --------------------------------------------------------------------------- #
 # Stock
@@ -250,7 +251,15 @@ def boss_tool(b: BossRect | BossCircle, frame: FaceFrame) -> list[Shape]:
     return [local.moved(frame.location(x, y)) for x, y in b.positions()]
 
 
+def angled_face_tools(a: AngledFaceCut, frame: FaceFrame, current: Shape) -> list[Shape]:
+    """Half-space above the tilted plane (local +Z, shifted by ``offset``), bounded by the part's diagonal."""
+    big = 2 * current.bounding_box().diagonal + 10
+    local = Pos(0, 0, a.offset) * Box(big, big, big, align=(Align.CENTER, Align.CENTER, Align.MIN))
+    return [local.moved(frame.location(0.0, 0.0))]
+
+
 CUT_BUILDERS: dict[type, Callable] = {
+    AngledFaceCut: angled_face_tools,
     StepCut: step_cut_tools,
     PocketRect: pocket_rect_tools,
     PocketCircle: pocket_circle_tools,
@@ -339,8 +348,8 @@ def compile_part(spec: PartSpec, complex_runner: ComplexRunner | None = None, st
         if isinstance(f, (BossRect, BossCircle)):
             run(f.id, "deterministic", lambda f=f: _union(current, boss_tool(f, frames[f.face]), f.id))
 
-    order = {StepCut: 0, PocketRect: 1, PocketCircle: 1, PocketPolygon: 1, Slot: 2, Hole: 3}
-    cuts = sorted((f for f in spec.features if isinstance(f, CUT_TYPES)), key=lambda f: order[type(f)])
+    order = {AngledFaceCut: -1, StepCut: 0, PocketRect: 1, PocketCircle: 1, PocketPolygon: 1, Slot: 2, Hole: 3}
+    cuts = sorted((f for f in spec.features if isinstance(f, (*CUT_TYPES, AngledFaceCut))), key=lambda f: order[type(f)])
     for f in cuts:
         builder = CUT_BUILDERS[type(f)]
         run(f.id, "deterministic", lambda f=f, b=builder: _cut(current, b(f, frames[f.face], current), f.id))

@@ -1,9 +1,25 @@
-// Strict mirror of backend/app/schemas/part_spec.py (PartSpec v1.1, ARCHITECTURE.md §6 + DRAWING_SPEC.md §5). Keep in sync.
+// Strict mirror of backend/app/schemas/part_spec.py (PartSpec v2.0, ARCHITECTURE.md §6 + DRAWING_SPEC.md §5). Keep in sync.
 
 export const REVIEW_CONFIDENCE_THRESHOLD = 0.85
 
-export type Face = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right'
-export const FACES: Face[] = ['top', 'bottom', 'front', 'back', 'left', 'right']
+export type OrthoFace = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right'
+/** v2.0: also 'plane:<id>' of a tilted 3+2 working plane */
+export type Face = OrthoFace | `plane:${string}`
+export const FACES: OrthoFace[] = ['top', 'bottom', 'front', 'back', 'left', 'right']
+
+export interface TiltedPlane {
+  id: string
+  name?: string | null
+  origin_x: number
+  origin_y: number
+  origin_z: number
+  rot_a_deg: number
+  rot_b_deg: number
+  rot_c_deg: number
+  rotation_convention: 'SPATIAL_XYZ'
+  confidence: number
+  source_note?: string | null
+}
 export type DatumOrigin = 'bottom_left_top_face' | 'bottom_left_bottom_face' | 'center_top_face' | 'center_bottom_face'
 export const DATUMS: DatumOrigin[] = ['bottom_left_top_face', 'bottom_left_bottom_face', 'center_top_face', 'center_bottom_face']
 export type XY = [number, number]
@@ -68,6 +84,8 @@ interface Positioned extends FeatureBase {
 interface Cut {
   depth?: number | null
   through_all: boolean
+  /** v2.0: meant to meet a cut from another face (no cross-face DFM error) */
+  intentional_intersection?: boolean
 }
 
 export interface Hole extends Positioned, Cut {
@@ -134,6 +152,12 @@ export interface StepCut extends FeatureBase {
   corner_radius: number
 }
 
+/** v2.0: mills the inclined exterior face of a tilted plane (removes stock on its outer side) */
+export interface AngledFaceCut extends FeatureBase {
+  type: 'angled_face_cut'
+  offset: number
+}
+
 export interface Complex3D extends FeatureBase {
   type: 'complex_3d'
   description: string
@@ -152,6 +176,7 @@ export type Feature =
   | BossRect
   | BossCircle
   | StepCut
+  | AngledFaceCut
   | Complex3D
 
 export type FeatureType = Feature['type']
@@ -204,8 +229,10 @@ export interface MissingDimension {
 }
 
 export interface PartSpec {
-  schema_version: '1.0' | '1.1'
+  schema_version: '1.0' | '1.1' | '2.0'
   input_source?: InputSource | null
+  part_number?: string | null
+  revision?: string | null
   drawing_metadata?: DrawingMetadata
   missing_dimensions?: MissingDimension[]
   part_name?: string | null
@@ -215,6 +242,7 @@ export interface PartSpec {
   datum_origin: DatumOrigin
   stock: Stock
   outer_profile: OuterProfile
+  tilted_planes?: TiltedPlane[]
   features: Feature[]
   edge_treatments: EdgeTreatment[]
   requires_complex_3d_fallback: boolean
@@ -291,6 +319,7 @@ export interface JobSummary {
   verified_at?: number | null
   batch_id?: string | null
   part_number?: string | null
+  revision?: string | null
 }
 
 export interface SpecVersion {

@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS batches (
 """
 JOB_COLUMNS = {  # v1.5 additions, added to existing databases on start
     "ai_initial_spec_json": "TEXT", "verified_at": "REAL", "batch_id": "TEXT", "batch_index": "INTEGER",
-    "part_number": "TEXT",
+    "part_number": "TEXT", "revision": "TEXT",
 }
 
 
@@ -226,6 +226,13 @@ class JobStore:
             db.row_factory = aiosqlite.Row
             rows = await (await db.execute("SELECT id FROM batches ORDER BY created_at DESC LIMIT ?", (limit,))).fetchall()
         return [b for r in rows if (b := await self.get_batch(r["id"]))]
+
+    async def jobs_by_part(self, part_number: str) -> list[dict[str, Any]]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("SELECT * FROM jobs WHERE part_number=? ORDER BY created_at",
+                                           (part_number,))).fetchall()
+        return [_row_to_job(r) for r in rows]
 
     async def batch_jobs(self, batch_id: str) -> list[dict[str, Any]]:
         async with self._connect() as db:

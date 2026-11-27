@@ -277,8 +277,10 @@ class Sheet:
         except Exception:  # noqa: BLE001 - subsetting is an optimisation only
             pass
         path.parent.mkdir(parents=True, exist_ok=True)
-        doc.save(str(path), garbage=3, deflate=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        doc.save(str(tmp), garbage=3, deflate=True)
         doc.close()
+        _atomic_replace(tmp, path)  # readers (download, QR scan, tests) never see a half-written PDF
         return path
 
     def to_svg(self, path: Path, title: str = "") -> Path:
@@ -474,3 +476,17 @@ def notes_block(sheet: Sheet, lines: list[str], bottom: float, right: float, wid
     for i, line in enumerate(wrapped):
         sheet.text(line, x + 1.0, top + step * (i + 1), size, layer="NOTES")
     return (x, top, right, bottom)
+
+
+def _atomic_replace(tmp: Path, dest: Path, attempts: int = 20) -> None:
+    """os.replace with a short retry: on Windows the target may be open for reading for a moment."""
+    import time
+
+    for i in range(attempts):
+        try:
+            os.replace(tmp, dest)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(0.05)

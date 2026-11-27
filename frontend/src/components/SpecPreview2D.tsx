@@ -1,3 +1,4 @@
+import { toLegacyCoords } from '../lib/frames'
 import type { ReactElement } from 'react'
 import type { Feature, PartSpec, Pattern } from '../types/partSpec'
 import { needsReview } from '../types/partSpec'
@@ -71,7 +72,8 @@ interface Props {
   height?: number
 }
 
-export default function SpecPreview2D({ spec, selectedId, onSelect, height = 260 }: Props) {
+export default function SpecPreview2D({ spec: input, selectedId, onSelect, height = 260 }: Props) {
+  const spec = toLegacyCoords(input) // v2.0 local face coordinates -> the projected frame this preview draws in
   const { length_x: L, width_y: W, thickness_z: T } = spec.stock
   if (![L, W, T].every((v) => ok(v) && v > 0)) {
     return <div className="p-3 text-xs text-slate-500">Vul de stockmaten in voor het 2D-voorbeeld.</div>

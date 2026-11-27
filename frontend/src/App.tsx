@@ -13,6 +13,8 @@ import Step3DViewer from './components/Step3DViewer'
 import UploadDropzone from './components/UploadDropzone'
 import { NavLinks } from './components/BatchDashboard'
 import VerifyButton from './components/VerifyButton'
+import SetupPlanPanel from './components/SetupPlanPanel'
+import V2Actions from './components/V2Actions'
 import { MOBILE_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import type { JobDetail, JobSummary, PipelineEvent } from './types/partSpec'
 import { TERMINAL } from './types/partSpec'
@@ -45,6 +47,7 @@ export default function App() {
   const [epoch, setEpoch] = useState(0)
   const [renderTick, setRenderTick] = useState(0)
   const [drawingSource, setDrawingSource] = useState<DrawingSource>('original')
+  const [softjawsOpen, setSoftjawsOpen] = useState(false)
   const refreshTimer = useRef<number | undefined>(undefined)
 
   const loadJobs = useCallback(() => api.listJobs().then(setJobs).catch(() => undefined), [])
@@ -236,6 +239,7 @@ export default function App() {
                   )}
                   <a className="btn" href={`/shopfloor/${job.job_id}`} target="_blank" rel="noreferrer" title="Alleen-lezen weergave voor tablet / telefoon aan de machine">Werkplaats</a>
                   <VerifyButton job={job} running={running} onDone={() => void loadJob()} />
+                  <V2Actions job={job} running={running} softjawsOpen={softjawsOpen} setSoftjawsOpen={setSoftjawsOpen} />
                   <button className="btn btn-danger" disabled={running} onClick={() => void onDelete()}>
                     Verwijderen
                   </button>
@@ -284,7 +288,10 @@ export default function App() {
                     <section className="panel p-3 text-sm text-slate-500">De PartSpec verschijnt na de extractie.</section>
                   )}
                 </div>
-                <div className="max-h-[85vh] min-h-[320px]">
+                <div className="flex max-h-[85vh] min-h-[320px] flex-col gap-3">
+                  {job.current_version > 0 && job.status === 'ready' && (
+                    <SetupPlanPanel jobId={job.job_id} version={job.version} tick={renderTick} onSoftjaws={() => setSoftjawsOpen(true)} />
+                  )}
                   <DfmWarningsPanel
                     report={report}
                     ambiguities={spec?.ambiguities ?? []}

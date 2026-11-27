@@ -171,6 +171,26 @@ async def get_shopfloor(request: Request, job_id: str, version: int | None = Non
     return await shopfloor_payload(_pipeline(request), job, version)
 
 
+@router.get("/jobs/{job_id}/setup-plan")
+async def get_setup_plan(request: Request, job_id: str, version: int | None = None) -> dict:
+    """v2.0 §3.1 SetupPlan: 3-axis vs 5-axis 3+2 clampings (pure geometry; from the DFM report when present)."""
+    from app.schemas.part_spec import DFMReport
+    from app.services.setup_planner import deck_off_from_stock, plan_setups
+
+    job = await _require_job(request, job_id)
+    pipeline = _pipeline(request)
+    v = version or job["current_version"]
+    if not v:
+        raise HTTPException(409, "job heeft nog geen PartSpec")
+    rp = pipeline.job_dir(job_id) / "versions" / f"v{v}" / "dfm_report.json"
+    rep = DFMReport.model_validate_json(rp.read_text(encoding="utf-8")) if rp.exists() else None
+    if rep and rep.setup_plan:
+        return {"version": v, **rep.setup_plan.model_dump(mode="json")}
+    spec = pipeline.load_spec(job_id, v)
+    plan = plan_setups(spec, deck_off_from_stock(spec, rep.stock_recommendation if rep else None))
+    return {"version": v, **plan.model_dump(mode="json")}
+
+
 @router.get("/metrics/accuracy")
 async def get_accuracy(request: Request) -> dict:
     from app.services import telemetry

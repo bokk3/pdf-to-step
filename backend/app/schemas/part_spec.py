@@ -1,4 +1,4 @@
-"""Canonical PartSpec v1 + DFMReport models (ARCHITECTURE.md §6 / §8).
+"""Canonical PartSpec v2.0 + DFMReport models (ARCHITECTURE.md §6 / §8, SPEC_V2_0_MULTISIDE_FIXTURING.md §2).
 
 This module is the single contract between extraction (LLM), the editor (UI),
 the deterministic CAD compiler and the verifier. Nothing else is allowed to pass
@@ -11,12 +11,14 @@ Coordinate conventions (must match the prompt in deepseek_client.py):
   the viewer in the top view, Z up). The default ``bottom_left_top_face`` puts
   the origin on the top face at the bottom-left corner of the top view, so the
   part occupies x∈[0, L], y∈[0, W], z∈[-T, 0] - the usual CNC work offset.
-* ``center_x`` / ``center_y`` (and other x/y fields of a feature) are datum
-  coordinates projected onto the feature's face, never mirrored:
-    - top / bottom : (x, y) = (X, Y)
-    - front / back : (x, y) = (X, Z)   front = Y-min face
-    - left / right : (x, y) = (Y, Z)   left  = X-min face
-  Cuts go into the material from that face; bosses grow out of it.
+* ``center_x`` / ``center_y`` (and other x/y fields of a feature) are local coordinates on the feature's face.
+  The face frames are defined in ``app/schemas/frames.py``: schema 2.0 uses the right-handed table of the v2.0
+  spec (u x v = outward normal, origin on a stock corner, local coordinates positive), stored v1.0 / v1.1 specs
+  keep their original convention (datum coordinates projected on the face, never mirrored). ``face`` may also be
+  ``plane:<id>`` of a ``tilted_planes`` entry (3+2 machining, v2.0 only).
+  Cuts go into the material from that face (local -Z); bosses grow out of it.
+* A payload without ``schema_version`` is a legacy v1 payload (``upgrade_part_spec``); new specs carry "2.0".
+  ``to_v2_coordinates`` converts a v1.x spec into the v2.0 convention (same geometry).
 
 Fields beyond the §6 example (all optional, documented in ARCHITECTURE.md §11):
 ``pattern`` / ``extra_positions`` for repeated features, ``countersink``,
@@ -33,12 +35,15 @@ from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.setup_plan import SetupPlan
 from app.schemas.tooling import StockRecommendation, ToolAssignment, ToolCheck
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "2.0"
+LEGACY_VERSIONS = ("1.0", "1.1")
 REVIEW_CONFIDENCE_THRESHOLD = 0.85
 
-Face = Literal["top", "bottom", "front", "back", "left", "right"]
+FACE_PATTERN = r"^(top|bottom|front|back|left|right|plane:[A-Za-z0-9_.\-]{1,48})$"
+Face = Annotated[str, Field(pattern=FACE_PATTERN, description="top|bottom|front|back|left|right|plane:<id>")]
 FACES: tuple[str, ...] = ("top", "bottom", "front", "back", "left", "right")
 DatumOrigin = Literal["bottom_left_top_face", "bottom_left_bottom_face", "center_top_face", "center_bottom_face"]
 Conf = Annotated[float, Field(ge=0.0, le=1.0)]
@@ -116,6 +121,22 @@ class CircularPattern(_Model):
 Pattern = Annotated[Union[LinearPattern, CircularPattern], Field(discriminator="type")]
 
 
+class TiltedPlane(_Model):
+    """3+2 indexed working plane (``face = "plane:<id>"``): SPATIAL_XYZ = intrinsic X -> Y -> Z (PLANE SPATIAL)."""
+
+    id: str = Field(min_length=1, max_length=48, pattern=r"^[A-Za-z0-9_.\-]+$")
+    name: str | None = None
+    origin_x: float
+    origin_y: float
+    origin_z: float
+    rot_a_deg: float = Field(0.0, ge=-360, le=360)
+    rot_b_deg: float = Field(0.0, ge=-360, le=360)
+    rot_c_deg: float = Field(0.0, ge=-360, le=360)
+    rotation_convention: Literal["SPATIAL_XYZ"] = "SPATIAL_XYZ"
+    confidence: Conf = 1.0
+    source_note: str | None = None
+
+
 class _FeatureBase(_Model):
     id: str = Field(min_length=1)
     face: Face = "top"
@@ -149,6 +170,8 @@ class _Positioned(_FeatureBase):
 class _Cut(_Model):
     depth: float | None = Field(default=None, gt=0, description="blind depth; ignored when through_all")
     through_all: bool = False
+    intentional_intersection: bool = Field(
+        False, description="v2.0: this cut is meant to meet a cut from another face (no cross-face DFM error)")
 
     @model_validator(mode="after")
     def _depth_or_through(self):
@@ -295,6 +318,20 @@ class StepCut(_FeatureBase):
         return self
 
 
+class AngledFaceCut(_FeatureBase):
+    """v2.0: mill the inclined exterior face of a tilted plane: removes all stock on the outward side (local +Z) of
+    ``face = "plane:<id>"`` (shifted by ``offset`` along the normal). Machined before the plane's other features."""
+
+    type: Literal["angled_face_cut"] = "angled_face_cut"
+    offset: float = Field(0.0, description="mm along the plane normal (+ leaves more material)")
+
+    @model_validator(mode="after")
+    def _plane_only(self) -> "AngledFaceCut":
+        if not self.face.startswith("plane:"):
+            raise ValueError(f"{self.id}: angled_face_cut needs face 'plane:<id>'")
+        return self
+
+
 class Complex3D(_FeatureBase):
     """Non-prismatic geometry built by sandboxed, LLM-generated build123d code (Layer 2)."""
 
@@ -307,7 +344,7 @@ class Complex3D(_FeatureBase):
 
 
 Feature = Annotated[
-    Union[Hole, PocketRect, PocketCircle, PocketPolygon, Slot, BossRect, BossCircle, StepCut, Complex3D],
+    Union[Hole, PocketRect, PocketCircle, PocketPolygon, Slot, BossRect, BossCircle, StepCut, AngledFaceCut, Complex3D],
     Field(discriminator="type"),
 ]
 CUT_TYPES = (Hole, PocketRect, PocketCircle, PocketPolygon, Slot, StepCut)
@@ -381,8 +418,10 @@ class MissingDimension(_Model):
 
 
 class PartSpec(_Model):
-    schema_version: Literal["1.0", "1.1"] = SCHEMA_VERSION
+    schema_version: Literal["1.0", "1.1", "2.0"] = SCHEMA_VERSION
     input_source: InputSource | None = None
+    part_number: str | None = Field(default=None, max_length=64, description="v2.0: revision lineage key")
+    revision: str | None = Field(default=None, max_length=16, description="v2.0: 'A', 'B' or '1', '2' ...")
     drawing_metadata: DrawingMetadata = Field(default_factory=DrawingMetadata)
     missing_dimensions: list[MissingDimension] = Field(default_factory=list)
     part_name: str | None = None
@@ -392,6 +431,7 @@ class PartSpec(_Model):
     datum_origin: DatumOrigin = "bottom_left_top_face"
     stock: Stock
     outer_profile: OuterProfile = Field(default_factory=OuterProfile)
+    tilted_planes: list[TiltedPlane] = Field(default_factory=list, description="v2.0: 3+2 working planes")
     features: list[Feature] = Field(default_factory=list)
     edge_treatments: list[EdgeTreatment] = Field(default_factory=list)
     requires_complex_3d_fallback: bool = False
@@ -404,12 +444,30 @@ class PartSpec(_Model):
             raise ValueError("PartSpec is millimetre-only: convert inch drawings on ingestion")
         return "mm"
 
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_part_spec(cls, data):
+        """v1.x -> v2.0 loader: stored v1.0 / v1.1 JSON validates unchanged (no DB migration). A payload without
+        ``schema_version`` predates v2.0 and is read as v1.1 (its side / bottom coordinates use the v1 frames)."""
+        if isinstance(data, dict) and "schema_version" not in data:
+            data = {**data, "schema_version": "1.1"}
+        return data
+
     @model_validator(mode="after")
     def _check(self) -> "PartSpec":
         ids = [f.id for f in self.features] + [e.id for e in self.edge_treatments]
         dupes = sorted({i for i in ids if ids.count(i) > 1})
         if dupes:
             raise ValueError(f"duplicate ids: {dupes}")
+        plane_ids = [p.id for p in self.tilted_planes]
+        if len(set(plane_ids)) != len(plane_ids):
+            raise ValueError("duplicate tilted_planes ids")
+        planes_used = {f.face[6:] for f in self.features if f.face.startswith("plane:")}
+        if (self.tilted_planes or planes_used) and self.schema_version in LEGACY_VERSIONS:
+            raise ValueError("tilted planes need schema_version 2.0")
+        unknown = sorted(planes_used - set(plane_ids))
+        if unknown:
+            raise ValueError(f"features reference unknown tilted planes: {unknown}")
         if any(isinstance(f, Complex3D) for f in self.features):
             self.requires_complex_3d_fallback = True
         return self
@@ -422,6 +480,10 @@ class PartSpec(_Model):
         x0, y0 = (-L / 2, -W / 2) if self.datum_origin.startswith("center") else (0.0, 0.0)
         z0 = -T if self.datum_origin.endswith("top_face") else 0.0
         return (x0, y0, z0), (x0 + L, y0 + W, z0 + T)
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.schema_version in LEGACY_VERSIONS
 
     def complex_features(self) -> list[Complex3D]:
         return [f for f in self.features if isinstance(f, Complex3D)]
@@ -441,6 +503,49 @@ class PartSpec(_Model):
         out += [f.id for f in self.features if f.confidence < REVIEW_CONFIDENCE_THRESHOLD]
         out += [e.id for e in self.edge_treatments if e.confidence < REVIEW_CONFIDENCE_THRESHOLD]
         return out
+
+
+def to_v2_coordinates(spec: PartSpec) -> PartSpec:
+    """Same geometry, v2.0 convention: maps every non-top feature's local coordinates from the v1 frame to the
+    v2.0 frame (all frames are axis-parallel, so it is a reflection + offset per axis). v2.0 specs are returned as-is."""
+    from app.schemas.frames import ortho_frames
+
+    if not spec.is_legacy:
+        return spec
+    f1, f2 = ortho_frames(spec, legacy=True), ortho_frames(spec, legacy=False)
+    d = spec.model_dump(mode="json")
+    d["schema_version"] = SCHEMA_VERSION
+    for feat in d["features"]:
+        face = feat.get("face", "top")
+        a, b = f1[face], f2[face]
+        sx, sy = float(a.u @ b.u), float(a.v @ b.v)  # +-1: v1 and v2 axes are parallel per face
+
+        def m(x: float, y: float) -> list[float]:
+            u, v, _ = b.local(a.point(x, y))
+            return [round(u, 9), round(v, 9)]
+
+        if "center_x" in feat:
+            feat["center_x"], feat["center_y"] = m(feat["center_x"], feat["center_y"])
+            feat["extra_positions"] = [m(*xy) for xy in feat.get("extra_positions") or []]
+            pat = feat.get("pattern")
+            if pat and pat["type"] == "linear":
+                pat["pitch_x"], pat["pitch_y"] = sx * pat["pitch_x"], sy * pat["pitch_y"]
+            elif pat:
+                t = math.radians(pat["start_angle_deg"])
+                pat["start_angle_deg"] = math.degrees(math.atan2(sy * math.sin(t), sx * math.cos(t)))
+                pat["sweep_deg"] = sx * sy * pat["sweep_deg"]
+        if "rotation_deg" in feat:
+            feat["rotation_deg"] = sx * sy * feat["rotation_deg"]
+        if "points_2d" in feat:
+            feat["points_2d"] = [m(*xy) for xy in feat["points_2d"]]
+        if "start_x" in feat:
+            feat["start_x"], feat["start_y"] = m(feat["start_x"], feat["start_y"])
+            feat["end_x"], feat["end_y"] = m(feat["end_x"], feat["end_y"])
+        if "x_min" in feat:
+            (ua, va), (ub, vb) = m(feat["x_min"], feat["y_min"]), m(feat["x_max"], feat["y_max"])
+            feat["x_min"], feat["x_max"] = min(ua, ub), max(ua, ub)
+            feat["y_min"], feat["y_max"] = min(va, vb), max(va, vb)
+    return PartSpec.model_validate(d)
 
 
 # --------------------------------------------------------------------------- #
@@ -494,6 +599,8 @@ class DFMReport(_Model):
     tool_checks: list[ToolCheck] = Field(default_factory=list)
     recommended_tools: list[ToolAssignment] = Field(default_factory=list)
     stock_recommendation: StockRecommendation | None = None
+    # v2.0 (SPEC_V2_0_MULTISIDE_FIXTURING.md §3.1)
+    setup_plan: SetupPlan | None = None
 
     @property
     def errors(self) -> list[DFMIssue]:

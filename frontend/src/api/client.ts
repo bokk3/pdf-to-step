@@ -116,6 +116,21 @@ export const api = {
     fd.append('file', file)
     return request<{ source: string; added: number; updated: number; skipped: string[]; total: number }>(`/api/config/tools/import-fusion?replace=${replace}`, { method: 'POST', body: fd })
   },
+  // ---- v2.0 -----------------------------------------------------------------------------------
+  setupPlan: (id: string) => request<SetupPlan & { version: number }>(`/api/jobs/${id}/setup-plan`),
+  softjaws: (id: string, req: Partial<SoftjawRequest>) =>
+    request<SoftjawReport>(`/api/jobs/${id}/softjaws`, { method: 'POST', body: JSON.stringify(req) }),
+  getVises: () => request<{ schema_version: string; vises: ViseSpec[] }>('/api/config/vises'),
+  putVises: (lib: { schema_version: string; vises: ViseSpec[] }) =>
+    request<{ schema_version: string; vises: ViseSpec[] }>('/api/config/vises', { method: 'PUT', body: JSON.stringify(lib) }),
+  partRevisions: (pn: string) =>
+    request<{ part_number: string; revisions: PartRevision[]; by_revision: string[] }>(`/api/parts/${encodeURIComponent(pn)}/revisions`),
+  revisionDiff: (job_old_id: string, job_new_id: string) =>
+    request<RevisionDiffReport>('/api/revisions/diff', { method: 'POST', body: JSON.stringify({ job_old_id, job_new_id }) }),
+  quote: (id: string, req: Partial<QuoteRequest>) =>
+    request<QuoteBreakdown>(`/api/jobs/${id}/quote`, { method: 'POST', body: JSON.stringify(req) }),
+  getRates: () => request<ShopRates>('/api/config/shop-rates'),
+  putRates: (r: ShopRates) => request<ShopRates>('/api/config/shop-rates', { method: 'PUT', body: JSON.stringify(r) }),
   reextract: (id: string, hint: string) =>
     request<{ job_id: string; status: string }>(`/api/jobs/${id}/reextract`, {
       method: 'POST',
@@ -251,4 +266,151 @@ export function useBatchEvents(batchId: string | null, onSnap: (s: BatchStatus) 
     es.addEventListener('end', () => es.close())
     return () => es.close()
   }, [batchId])
+}
+// ---- v2.0 setup plan / softjaws / revisions / quotes ---------------------------------------------
+export interface SetupStep {
+  index: number
+  normals: [number, number, number][]
+  faces: string[]
+  feature_ids: string[]
+  deck_off: boolean
+  clamping: string
+  workholding: 'vise_hardjaws' | 'vise_softjaws' | 'vise_5axis'
+}
+export interface SetupPlan {
+  min_setups_3axis: number
+  min_setups_5axis_3plus2: number
+  deck_off_required: boolean
+  softjaws_recommended: boolean
+  setups_3axis: SetupStep[]
+  setups_5axis_3plus2: SetupStep[]
+  notes: string[]
+}
+export interface ViseSpec {
+  id: string
+  name: string
+  jaw_width_mm: number
+  jaw_height_mm: number
+  jaw_depth_mm: number
+  max_opening_mm: number
+  bolt_spacing_mm: number
+  bolt_height_from_bottom_mm: number
+  bolt_clearance_dia_mm: number
+  bolt_cbore_dia_mm: number
+  bolt_cbore_depth_mm: number
+  default_jaw_gap_mm: number
+}
+export interface SoftjawRequest {
+  vise_id: string
+  op2_flip_axis: 'X' | 'Y'
+  z_rotation_deg: 0 | 90
+  grip_depth_mm: number
+  xy_clearance_mm: number
+  dogbone_radius_mm: number
+  jaw_gap_mm: number | null
+  jaw_material: 'aluminum_6082' | 'steel_c45'
+}
+export interface SoftjawCheck {
+  code: string
+  passed: boolean
+  blocking: boolean
+  value_mm: number | null
+  limit_mm: number | null
+  message: string
+}
+export interface SoftjawReport {
+  job_id: string
+  version: number
+  passed: boolean
+  checks: SoftjawCheck[]
+  jaw_blank_mm: [number, number, number]
+  part_envelope_mm: [number, number, number]
+  cavity_depth_y_mm: number
+  dogbones: [number, number][]
+  part_offset_mm: [number, number, number]
+  recommended_tool: { tool_id: string; tool_name: string; diameter_mm: number; flute_length_mm: number } | null
+  urls?: Record<string, string>
+}
+export interface PartRevision {
+  job_id: string
+  filename: string
+  revision: string | null
+  status: string
+  current_version: number
+  created_at: number
+}
+export type ChangeCategory = 'BREAKING_CAM' | 'GEOMETRY_CHANGE' | 'METADATA_ONLY'
+export interface FeatureDiffItem {
+  category: ChangeCategory
+  change: string
+  scope: string
+  feature_type: string | null
+  id_old: string | null
+  id_new: string | null
+  face: string | null
+  moved_mm: number | null
+  fields: { path: string; before: unknown; after: unknown }[]
+  message: string
+}
+export interface RevisionDiffReport {
+  diff_id: string
+  job_old_id: string
+  job_new_id: string
+  version_old: number
+  version_new: number
+  part_number: string | null
+  revision_old: string | null
+  revision_new: string | null
+  overall: ChangeCategory | 'IDENTICAL'
+  counts: Record<string, number>
+  volumes: { old_mm3: number; new_mm3: number; added_mm3: number; removed_mm3: number; unchanged_mm3: number } | null
+  items: FeatureDiffItem[]
+  urls: Record<string, string>
+}
+export type MachineType = '3axis_vmc' | '5axis_3plus2'
+export interface QuoteRequest {
+  quantities: number[]
+  custom_quantity: number | null
+  machine_type: MachineType
+  include_softjaws: boolean | null
+  margin_pct: number | null
+}
+export interface QuoteLine { key: string; label: string; value: number; unit: string; formula: string }
+export interface PriceBreak { quantity: number; unit_cost: number; unit_price: number; total_price: number; setup_share: number }
+export interface MachineQuote {
+  machine_type: MachineType
+  label: string
+  hourly_rate: number
+  setups: number
+  t_setup_min: number
+  t_cycle_min: number
+  t_load_unload_min: number
+  lines: QuoteLine[]
+  price_breaks: PriceBreak[]
+}
+export interface QuoteBreakdown {
+  job_id: string
+  version: number
+  currency: string
+  margin_pct: number
+  material_group: string
+  include_softjaws: boolean
+  c_mat: number
+  material_lines: QuoteLine[]
+  machines: Record<MachineType, MachineQuote>
+  selected: MachineType
+  cheaper: MachineType | null
+  notes: string[]
+  exports: Record<'pdf' | 'csv', string>
+}
+export interface ShopRates {
+  schema_version: string
+  currency: string
+  machines: Record<MachineType, { label: string; hourly_rate: number; tool_change_sec: number; load_unload_sec: number }>
+  setup_minutes: { base_cam_programming: number; per_3axis_setup: number; per_5axis_setup: number; mill_softjaws_pair: number }
+  materials: Record<string, { price_per_kg: number; mrr_cm3_per_min: number; finish_min_per_100cm2: number; hole_sec_base: number;
+    tap_sec: number; ream_sec: number; chip_load_efficiency: number }>
+  saw_waste_factor: number
+  margin_pct_default: number
+  fine_finish_factor: number
 }

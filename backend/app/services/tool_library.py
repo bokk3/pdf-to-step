@@ -345,8 +345,9 @@ class _Checker:
         self.checks.append(ToolCheck(feature_id=fid, operation=op, status="warning", message=msg, suggested_fix=fix))
 
     def depth(self, f) -> tuple[float, bool]:
-        (x0, y0, z0), (x1, y1, z1) = self.spec.stock_bbox()
-        thick = {"top": z1 - z0, "bottom": z1 - z0, "front": y1 - y0, "back": y1 - y0}.get(f.face, x1 - x0)
+        from app.schemas.frames import frames
+
+        thick = frames(self.spec)[f.face].thickness
         through = bool(getattr(f, "through_all", False))
         d = thick if through else (getattr(f, "depth", None) or thick)
         return d, through

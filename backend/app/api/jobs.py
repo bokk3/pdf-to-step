@@ -62,6 +62,7 @@ def _summary(pipeline: Pipeline, job: dict[str, Any]) -> dict[str, Any]:
     out["verified_at"] = job.get("verified_at")
     out["batch_id"] = job.get("batch_id")
     out["part_number"] = job.get("part_number")
+    out["revision"] = job.get("revision")
     res = job.get("result") or {}
     out["dfm"] = ({k: res.get(k) for k in ("passed", "errors", "warnings", "needs_review", "ambiguities")}
                   if res else None)

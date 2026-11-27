@@ -7,11 +7,12 @@ Each version has its own contract document; this file tracks what is built. Stat
 | v1.0 | [ARCHITECTURE.md](ARCHITECTURE.md) | PDF → PartSpec → native B-Rep STEP, DFM gate, self-healing, operator UI, Tailscale | ✅ |
 | v1.1 | [DRAWING_SPEC.md](DRAWING_SPEC.md) | EN ISO 2D drawings, round-trip benchmark, sketch / DXF / STEP intake | ✅ |
 | v1.5 | [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md) | CAM-ready packages: tool library DFM, XCAF colours, stock + setup sheet, QR shopfloor view, batch intake, telemetry | ✅ |
+| v2.0 | [SPEC_V2_0_MULTISIDE_FIXTURING.md](SPEC_V2_0_MULTISIDE_FIXTURING.md) | multi-sided & 3+2 machining, setup planner, softjaws, 3D revision diff, quoting | ✅ |
 | v2.5 | – | self-learning loop on the operator-correction telemetry captured from v1.5 | ⏳ |
 
 Versions are built in order: v1.1 is finished (all phases) before v1.5 starts, because v1.5 lists v1.1 as its
-prerequisite. `SPEC_V1_5_CAM_SHOPFLOOR.md` refers to the v1.1 contract as `DRAWING_ENGINE_SPEC.md`; in this
-repository that file is `DRAWING_SPEC.md`.
+prerequisite. `SPEC_V1_5_CAM_SHOPFLOOR.md` and the v2.0 spec refer to the v1.1 contract as `DRAWING_ENGINE_SPEC.md`;
+in this repository that file is `DRAWING_SPEC.md`.
 
 ## v1.1 — EN ISO drawings & intake fast paths (DRAWING_SPEC.md §7, strict phase order)
 
@@ -55,3 +56,15 @@ repository that file is `DRAWING_SPEC.md`.
 Open with the workshop: run a real multi-part RFQ PDF and a scanned batch through `/batches` (the scanned-page
 fallback is only exercised offline), import the real Fusion 360 tool library, and check the coloured STEP in the CAM
 system (face colours → machining strategies).
+## v2.0 — multi-sided & 3+2 machining, fixturing, revisions, quoting (SPEC_V2_0_MULTISIDE_FIXTURING.md §7)
+
+| Stream | Scope | Status |
+|---|---|---|
+| A | PartSpec 2.0 (`part_number`, `revision`, `tilted_planes`, `face = "plane:<id>"`, `angled_face_cut`, `intentional_intersection`); `schemas/frames.py` as the one source of face frames (v2.0 right-handed table, v1.x stored convention kept, SPATIAL_XYZ tilted planes); compiler, verifier, drawing engine, tool checks and XCAF colouring on all 6 faces + tilted planes; `setup_planner.py` (3-axis vs 5-axis 3+2, deck-off, softjaw advice, `GET /setup-plan`); DFM v3 cross-face web / breakthrough check (`BRepExtrema_DistShapeShape`); extraction prompt on the v2.0 frames | ✅ `test_multiside_3plus2.py` (Lagerblok_Schuin: bottom pocket + H7, right M10, 30° plane with angled face + H7 bore; 0.8 mm web) |
+| B | `vises.json`, `softjaw_generator.py`: Op 2 pose, undercut-safe swept silhouette cavity, dogbones (< 135°), bolt counterbores, blocking safety checks (3 mm counterbore wall, 5 mm jaw wall, opening, protrusion), 2-body AP214 STEP (`Fixed_Jaw` / `Movable_Jaw`, emerald pockets), assembly GLB, recommended end mill; `/api/config/vises`, `POST /softjaws` | ✅ `test_softjaws.py` (incl. proof that a raw boolean of the part would lock it in) |
+| C | Part lineage (normalized part number + revision), `revision_diff.py` (exact added / removed / unchanged booleans, 0.05 mm³ noise filter, 3-colour GLB, semantic diff BREAKING_CAM / GEOMETRY_CHANGE / METADATA_ONLY, 1-page PDF); `quoting_engine.py` (deterministic formulas on B-Rep volumes / areas, hole list, setup plan and `shop_rates.json`; 3-axis vs 5-axis price breaks; PDF / CSV) | ✅ `test_revision_diff.py` (deeper pocket + M6 -> M8 H7 exact to 1e-4), `test_quoting.py` (hand-checked formulas) |
+| D | Setup plan panel, softjaw modal with orbitable assembly + layer toggles, `/compare/<old>/<new>` revision diff page (green / red / gray layers + change badges), `/quote/<job>` calculator (live quantities / margin / machine, PDF / CSV), `/settings` (vises, shop rates), plane-aware spec editor and 2D preview | ✅ checked in the browser |
+
+Open with the workshop: import a coloured multi-side STEP and `softjaws.step` into the CAM package (tilted-plane
+work offsets, emerald pocket faces), calibrate `shop_rates.json` (MRR, finishing rates) against real cycle times,
+and extract a real drawing with an inclined face to check the vision model's plane origins / angles.
