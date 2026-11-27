@@ -11,6 +11,8 @@ import PdfViewer from './components/PdfViewer'
 import PipelineProgress, { STATUS_LABEL } from './components/PipelineProgress'
 import Step3DViewer from './components/Step3DViewer'
 import UploadDropzone from './components/UploadDropzone'
+import { NavLinks } from './components/BatchDashboard'
+import VerifyButton from './components/VerifyButton'
 import { MOBILE_QUERY, useMediaQuery } from './hooks/useMediaQuery'
 import type { JobDetail, JobSummary, PipelineEvent } from './types/partSpec'
 import { TERMINAL } from './types/partSpec'
@@ -159,7 +161,7 @@ export default function App() {
         selectedFeature={selectedFeature} setSelectedFeature={setSelectedFeature}
         orthoUrl={bust(art['ortho_check.png'])} bboxMax={bboxMax} floorZ={g?.bbox_min_mm[2] ?? 0}
         onSelectJob={selectJob} onUploaded={onUploaded} onDelete={() => void onDelete()}
-        onRebuilt={onRebuilt} onReextract={onReextract}
+        onRebuilt={onRebuilt} onReextract={onReextract} onReload={() => void loadJob()}
         renderTick={renderTick} pdfUrl={pdfUrl} sourceToggle={sourceToggle} onDrawing={onDrawing}
       />
     )
@@ -173,7 +175,8 @@ export default function App() {
           <h1 className="text-sm font-semibold text-slate-100">PDF → STEP · CNC-generator</h1>
           <p className="truncate text-[11px] text-slate-500">2D-tekening → PartSpec → native B-Rep (build123d / OCCT) → STEP {health?.step_schema ?? 'AP214'}</p>
         </div>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5 text-[11px]">
+        <NavLinks />
+        <div className="flex flex-wrap items-center justify-end gap-1.5 text-[11px]">
           <Chip ok={!!health?.occt?.ok} label={health?.occt?.ok ? `OCCT · build123d ${health.occt.build123d}` : 'OCCT ?'} />
           <Chip
             ok={!!health && !health.deepseek.mock && health.deepseek.reachable !== false}
@@ -228,6 +231,11 @@ export default function App() {
                       STEP v{job.version}
                     </a>
                   )}
+                  {art['setup_sheet.pdf'] && (
+                    <a className="btn" href={bust(art['setup_sheet.pdf'])} target="_blank" rel="noreferrer">Instelblad</a>
+                  )}
+                  <a className="btn" href={`/shopfloor/${job.job_id}`} target="_blank" rel="noreferrer" title="Alleen-lezen weergave voor tablet / telefoon aan de machine">Werkplaats</a>
+                  <VerifyButton job={job} running={running} onDone={() => void loadJob()} />
                   <button className="btn btn-danger" disabled={running} onClick={() => void onDelete()}>
                     Verwijderen
                   </button>

@@ -1,5 +1,5 @@
 import { GizmoHelper, GizmoViewport, Grid, OrbitControls, useGLTF } from '@react-three/drei'
-import { Canvas, useThree } from '@react-three/fiber'
+import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber'
 import { Component, Suspense, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react'
 import * as THREE from 'three'
 
@@ -11,11 +11,17 @@ interface Props {
   orthoUrl?: string
   bboxMax?: [number, number, number]
   floorZ?: number // grid height: under the part (the default datum puts the top face at Z = 0)
+  // v1.5 shopfloor
+  clipPlane?: THREE.Plane | null // world (= CAD) coordinates
+  highlight?: string[] | null // CAM colours (#RRGGBB) to keep; other faces are dimmed
+  onPick?: (point: THREE.Vector3, hex: string | null) => void
+  markers?: [number, number, number][]
+  hideOrtho?: boolean
 }
 
 type Tab = '3d' | 'ortho'
 
-export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0 }: Props) {
+export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0, clipPlane, highlight, onPick, markers, hideOrtho }: Props) {
   const [tab, setTab] = useState<Tab>('3d')
   const [wireframe, setWireframe] = useState(false)
   const [edges, setEdges] = useState(true)
@@ -29,10 +35,10 @@ export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0 }: 
       <div className="panel-title">
         <div className="flex gap-1 normal-case tracking-normal">
           <button className={`btn ${tab === '3d' ? 'btn-primary' : ''}`} onClick={() => setTab('3d')}>3D-model</button>
-          <button className={`btn ${tab === 'ortho' ? 'btn-primary' : ''}`} onClick={() => setTab('ortho')} disabled={!orthoUrl}
+          {!hideOrtho && <button className={`btn ${tab === 'ortho' ? 'btn-primary' : ''}`} onClick={() => setTab('ortho')} disabled={!orthoUrl}
             title="ortho_check.png: voor-, zij-, boven- en isoaanzicht">
             Aanzichten
-          </button>
+          </button>}
         </div>
         {tab === '3d' && (
           <div className="scroll-thin -mx-1 flex max-w-full items-center gap-1 overflow-x-auto px-1 normal-case tracking-normal">
@@ -51,7 +57,8 @@ export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0 }: 
               <Canvas
                 dpr={[1, 2]}
                 camera={{ position: [size * 1.6, -size * 2, size * 1.4], fov: 35, near: 0.1, far: size * 200 }}
-                gl={{ antialias: true }}
+                gl={{ antialias: true, localClippingEnabled: true }}
+                onCreated={({ gl }) => { gl.localClippingEnabled = true }}
                 className="!absolute inset-0"
               >
                 <color attach="background" args={['#0b1220']} />
@@ -61,7 +68,14 @@ export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0 }: 
                 <directionalLight position={[-size * 3, size * 2, size]} intensity={0.6} />
                 <OrbitControls makeDefault enableDamping dampingFactor={0.12} />
                 <Suspense fallback={null}>
-                  <Model url={glbUrl} wireframe={wireframe} edges={edges} fitTick={fitTick} />
+                  <Model url={glbUrl} wireframe={wireframe} edges={edges} fitTick={fitTick}
+                    clipPlane={clipPlane ?? null} highlight={highlight ?? null} onPick={onPick} />
+                  {markers?.map((p, i) => (
+                    <mesh key={i} position={p} renderOrder={10}>
+                      <sphereGeometry args={[Math.max(size * 0.012, 0.6), 16, 12]} />
+                      <meshBasicMaterial color="#f8fafc" depthTest={false} transparent opacity={0.9} />
+                    </mesh>
+                  ))}
                 </Suspense>
                 {grid && (
                   <Grid
@@ -94,7 +108,19 @@ export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0 }: 
   )
 }
 
-function Model({ url, wireframe, edges, fitTick }: { url: string; wireframe: boolean; edges: boolean; fitTick: number }) {
+interface ModelProps {
+  url: string
+  wireframe: boolean
+  edges: boolean
+  fitTick: number
+  clipPlane: THREE.Plane | null
+  highlight: string[] | null
+  onPick?: (point: THREE.Vector3, hex: string | null) => void
+}
+
+const DIM = new THREE.Color(0.05, 0.055, 0.065) // linear: faces outside the legend filter
+
+function Model({ url, wireframe, edges, fitTick, clipPlane, highlight, onPick }: ModelProps) {
   const { scene } = useGLTF(url)
   const { camera, controls, size, invalidate } = useThree()
   const root = useMemo(() => {
@@ -133,6 +159,40 @@ function Model({ url, wireframe, edges, fitTick }: { url: string; wireframe: boo
     })
   }, [root, wireframe, edges])
 
+  useEffect(() => {
+    const planes = clipPlane ? [clipPlane] : []
+    root.traverse((o) => {
+      const m = (o as THREE.Mesh).material as THREE.Material | undefined
+      if (m) {
+        m.clippingPlanes = planes
+        m.needsUpdate = true
+      }
+    })
+    invalidate()
+  }, [root, clipPlane, invalidate])
+
+  useEffect(() => {
+    const keep = highlight ? new Set(highlight.map((h) => h.toUpperCase())) : null
+    const c = new THREE.Color()
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh
+      if (!mesh.isMesh) return
+      const attr = mesh.geometry.getAttribute('color') as THREE.BufferAttribute | undefined
+      const srgb = (attr as unknown as { srgb?: Float32Array } | undefined)?.srgb
+      if (!attr || !srgb) return
+      for (let i = 0; i < attr.count; i++) {
+        const hex = srgbHex(srgb, i)
+        if (keep && !keep.has(hex)) attr.setXYZ(i, DIM.r, DIM.g, DIM.b)
+        else {
+          c.setRGB(srgb[i * 3], srgb[i * 3 + 1], srgb[i * 3 + 2], THREE.SRGBColorSpace)
+          attr.setXYZ(i, c.r, c.g, c.b)
+        }
+      }
+      attr.needsUpdate = true
+    })
+    invalidate()
+  }, [root, highlight, invalidate])
+
   // GLB is Y-up (glTF convention); rotate back to the CAD Z-up frame.
   useLayoutEffect(() => {
     root.rotation.set(Math.PI / 2, 0, 0)
@@ -143,6 +203,7 @@ function Model({ url, wireframe, edges, fitTick }: { url: string; wireframe: boo
   // horizontal field of view so a portrait phone screen does not crop the part.
   useEffect(() => {
     const cam = camera as THREE.PerspectiveCamera
+    if (size.width < 2 || size.height < 2) return // not laid out yet: a 0-px canvas gives an infinite distance
     root.updateWorldMatrix(true, true)
     const box = new THREE.Box3().setFromObject(root)
     if (box.isEmpty()) return
@@ -165,7 +226,27 @@ function Model({ url, wireframe, edges, fitTick }: { url: string; wireframe: boo
     // size: refit when the panel changes shape (tab switch, rotation)
   }, [root, camera, controls, size.width, size.height, fitTick, invalidate])
 
-  return <primitive object={root} />
+  return (
+    <primitive
+      object={root}
+      onClick={onPick ? (e: ThreeEvent<MouseEvent>) => {
+        if (e.delta > 8) return // an orbit drag, not a tap
+        e.stopPropagation()
+        // raycasts ignore clipping planes: take the first hit on the visible side of the section
+        const hit = e.intersections.find((h) => (h.object as THREE.Mesh).isMesh && (!clipPlane || clipPlane.distanceToPoint(h.point) >= 0))
+        if (!hit) return
+        const mesh = hit.object as THREE.Mesh
+        const attr = mesh.geometry?.getAttribute('color') as THREE.BufferAttribute | undefined
+        const srgb = (attr as unknown as { srgb?: Float32Array } | undefined)?.srgb
+        onPick(hit.point.clone(), srgb && hit.face ? srgbHex(srgb, hit.face.a) : null)
+      } : undefined}
+    />
+  )
+}
+
+function srgbHex(srgb: Float32Array, i: number): string {
+  const b = (v: number) => Math.round(v * 255).toString(16).padStart(2, '0')
+  return `#${b(srgb[i * 3])}${b(srgb[i * 3 + 1])}${b(srgb[i * 3 + 2])}`.toUpperCase()
 }
 
 /** glTF COLOR_0 is linear; the exporter writes the palette's sRGB bytes. Convert once so the screen shows the exact

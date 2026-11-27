@@ -535,7 +535,33 @@ data/jobs/<job_id>/
 * **Live 2D preview** (phase 4, `SpecPreview2D.tsx`): the editor draws the draft PartSpec as a first-angle front +
   top view in the browser (no request), with the same pattern expansion as `positions()`; shapes select features.
 
-### 11.11 Open items
+### 11.11 CAM-ready output & shopfloor (SPEC_V1_5_CAM_SHOPFLOOR.md, v1.5)
+* **Shop configuration** lives in `data/config/{tools,stock_catalog,cam_colors}.json` (defaults in `app/defaults/`;
+  a broken file falls back to the defaults, every save keeps a backup). Material groups come from the PartSpec
+  material string (EN AW / 1.4301 / S235 / POM …).
+* **DFM v2** adds `tool_checks`, `recommended_tools` and `stock_recommendation` to `dfm_report.json`. Tool checks
+  are warnings / info, never gate failures: a part the magazine cannot make is still a valid STEP.
+* **XCAF colours**: OCCT converts `Quantity_TOC_RGB` (linear) to sRGB on write, so colours are set as
+  `Quantity_TOC_sRGB` and the file carries the palette's exact values. The body colour sits on the solid label,
+  feature colours on face sub-shape labels; the solid is never split. Face classification uses geometric
+  signatures (axis + radius within 0.05 mm) against the PartSpec, not face indices. The GLB carries the same sRGB
+  bytes as vertex colours; the viewer converts them to linear once.
+* **QR / setup sheet**: QR codes are vector rectangles (scannable at 300 dpi, verified with OpenCV in the tests).
+  Without `PUBLIC_TAILSCALE_URL` a short warning replaces the code. The setup sheet is rendered from the built
+  STEP after the drawing (deferred render on `PATCH /spec`, like the drawing).
+* **Telemetry**: the latest AI-sourced revision is the baseline (`ai_initial_spec_json`); confidence, notes and
+  drawing metadata are not counted as corrections. Rows are written on every `PATCH /spec` and on
+  `POST /jobs/{id}/verify`; deterministic intakes (DXF, STEP) have no baseline and are not logged.
+* **Batches**: the split runs synchronously in `POST /api/batches` (text layer: milliseconds per page), children
+  run in the background behind an `asyncio.Semaphore(MAX_CONCURRENT_JOBS)`; single uploads are not throttled.
+  Scanned pages (< 15 title-block characters) go to one `deepseek-flash` call only when a real API key is
+  configured; offline they continue the previous part. A service restart does not resume queued batch children.
+* **Shopfloor view** (`/shopfloor/<job>`): read-only, no LLM and no CAD kernel in the API process; feature anchor
+  points are computed once per version in a CAD worker and cached (`shopfloor_anchors.json`). Tap-to-inspect maps
+  the hit point (first intersection on the visible side of the section plane) to the nearest feature anchor of the
+  tapped colour category.
+
+### 11.12 Open items
 * Milestone 1: import the generated STEP files into the workshop CAM package (colours, faces, datum) and add 3
   real workshop example JSONs to `backend/tests/fixtures/`.
 * Milestone 2: add 5–10 real workshop PDFs + expected `*.part_spec.json` as the extraction benchmark (the current

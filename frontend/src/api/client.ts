@@ -97,6 +97,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(overrides),
     }),
+  /** v1.5 "Mark verified": the operator confirms the current PartSpec (logged against the AI reading). */
+  verify: (id: string) => request<{ verified: boolean; version: number }>(`/api/jobs/${id}/verify`, { method: 'POST' }),
+  setupSheet: (id: string) =>
+    request<{ artifacts: Record<string, string> }>(`/api/jobs/${id}/setup-sheet`, { method: 'POST' }),
+  shopfloor: (id: string) => request<Shopfloor>(`/api/jobs/${id}/shopfloor`),
+  listBatches: () => request<BatchStatus[]>('/api/batches'),
+  getBatch: (id: string) => request<BatchStatus>(`/api/batches/${id}`),
+  uploadBatch: (file: File) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<{ batch_id: string; job_count: number; page_count: number }>('/api/batches', { method: 'POST', body: fd })
+  },
+  getTools: () => request<ToolLibrary>('/api/config/tools'),
+  putTools: (lib: ToolLibrary) => request<ToolLibrary>('/api/config/tools', { method: 'PUT', body: JSON.stringify(lib) }),
+  importTools: (file: File, replace: boolean) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<{ source: string; added: number; updated: number; skipped: string[]; total: number }>(`/api/config/tools/import-fusion?replace=${replace}`, { method: 'POST', body: fd })
+  },
   reextract: (id: string, hint: string) =>
     request<{ job_id: string; status: string }>(`/api/jobs/${id}/reextract`, {
       method: 'POST',
@@ -146,4 +165,90 @@ export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`
   return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
+
+// ---- v1.5 shopfloor / batches / tool library ------------------------------------------------------
+export interface CamColorInfo { name: string; hex: string; meaning: string }
+export interface ShopfloorFeature {
+  id: string
+  type: string
+  face: string | null
+  label: string
+  category: string
+  tolerance: string | null
+  ra_um: number | null
+  anchors: [number, number, number][]
+  tools: { operation: string; tool_id: string; tool_name: string; diameter_mm: number }[]
+  issues: { status: string; operation: string; message: string; suggested_fix: string | null }[]
+}
+export interface Shopfloor {
+  job_id: string
+  version: number
+  filename: string
+  status: string
+  verified_at: number | null
+  part_name: string
+  material: string
+  general_tolerance: string
+  datum_origin: string
+  bbox: { min: [number, number, number]; max: [number, number, number] }
+  stock_recommendation: { profile_label: string; recommended_blank_mm: { x: number; y: number; z: number }; raw_mass_kg: number | null } | null
+  palette: Record<string, CamColorInfo>
+  color_counts: Record<string, number>
+  features: ShopfloorFeature[]
+  artifacts: Record<string, string>
+}
+export interface BatchJob {
+  job_id: string
+  part_number: string | null
+  filename: string
+  pages: number[]
+  status: string
+  progress: number
+  message: string | null
+  running: boolean
+  current_version: number | null
+  dfm: { passed: boolean; errors: number; warnings: number; needs_review: boolean } | null
+}
+export interface BatchStatus {
+  batch_id: string
+  filename: string
+  status: string
+  message: string | null
+  page_count: number
+  created_at: number
+  job_count: number
+  ready_count: number
+  finished_count: number
+  progress: number
+  jobs: BatchJob[]
+}
+export interface ToolSpec {
+  id: string
+  name: string
+  tool_type: string
+  diameter_mm: number
+  flute_length_mm: number
+  overall_length_mm?: number | null
+  corner_radius_mm: number
+  flutes: number
+  materials: string[]
+  thread_spec?: string | null
+  tolerance_class?: string | null
+  in_magazine: boolean
+  notes?: string
+}
+export interface ToolLibrary { schema_version: string; tools: ToolSpec[] }
+
+/** Batch SSE (`event: batch` snapshots until `end`). */
+export function useBatchEvents(batchId: string | null, onSnap: (s: BatchStatus) => void) {
+  const cb = useRef(onSnap)
+  cb.current = onSnap
+  useEffect(() => {
+    if (!batchId) return
+    const es = new EventSource(`/api/batches/${batchId}/events`)
+    es.addEventListener('batch', (m) => cb.current(JSON.parse((m as MessageEvent).data) as BatchStatus))
+    es.addEventListener('end', () => es.close())
+    return () => es.close()
+  }, [batchId])
 }
