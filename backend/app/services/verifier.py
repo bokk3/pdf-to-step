@@ -444,7 +444,12 @@ def build_report(spec: PartSpec, version: int, shape, statuses: list[FeatureBuil
             issues.insert(0, DFMIssue(code="FEATURE_FAILED", severity=Severity.error, feature_id=st.feature_id,
                                       message=f"Feature kon niet gebouwd worden: {st.error}"))
     stats = {"volume_mm3": geo.volume_mm3, "feature_count": float(len(spec.features))}
+    shop = shopfloor_checks(spec, s, geo)
+    issues += shop.get("issues", [])
     mass = estimate_mass_g(spec, geo.volume_mm3)
+    rec = shop.get("stock")
+    if mass is None and rec is not None and rec.part_mass_kg is not None:
+        mass = rec.part_mass_kg * 1000.0
     if mass is not None:
         stats["mass_g"] = mass
     return DFMReport(
@@ -456,7 +461,29 @@ def build_report(spec: PartSpec, version: int, shape, statuses: list[FeatureBuil
         review_items=spec.review_items(),
         colored_faces=colored_faces or {},
         stats=stats,
+        material_group=shop.get("group"),
+        tool_checks=shop.get("checks", []),
+        recommended_tools=shop.get("assign", []),
+        stock_recommendation=rec,
     )
+
+
+def shopfloor_checks(spec: PartSpec, s: Settings, geo: GeometryCheck | None) -> dict:
+    """v1.5 DFM v2 (workshop tool library) + raw-stock advice. Never raises: a broken config only logs an info."""
+    from app.services.stock_catalog import load_stock, solve_stock
+    from app.services.tool_library import load_tools, material_group, tool_checks
+
+    out: dict = {"group": material_group(spec.material)}
+    try:
+        if s.dfm_tool_checks:
+            out["checks"], out["assign"], out["issues"] = tool_checks(spec, load_tools(s), out["group"])
+        if s.stock_advisor and geo is not None:
+            size = tuple(float(b - a) for a, b in zip(geo.bbox_min_mm, geo.bbox_max_mm))
+            out["stock"] = solve_stock(size, geo.volume_mm3, load_stock(s), out["group"])  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001
+        out.setdefault("issues", []).append(DFMIssue(code="SHOPFLOOR_CHECK_FAILED", severity=Severity.info,
+                                                     message=f"Gereedschap-/voorraadcontrole mislukt: {exc}"))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -480,8 +507,18 @@ def _cylinder_faces(shape) -> list[tuple[object, float, np.ndarray, np.ndarray]]
     return out
 
 
-def cam_face_colors(shape, spec: PartSpec) -> tuple[dict[tuple[float, float, float], list], dict[str, int]]:
-    """Find the bore faces of threaded holes (blue) and tight-tolerance holes (red)."""
+def cam_face_colors(shape, spec: PartSpec, palette=None) -> tuple[dict[tuple[float, float, float], list], dict[str, int]]:
+    """CAM face colours ({rgb: faces}, counts per category) with the v1.5 palette (step_xcaf_exporter)."""
+    from app.services.shop_config import DEFAULTS_DIR
+    from app.services.step_xcaf_exporter import CamPalette, classify_faces
+
+    pal = palette or CamPalette.model_validate_json((DEFAULTS_DIR / "cam_colors.json").read_text(encoding="utf-8"))
+    col = classify_faces(shape, spec, pal)
+    return col.by_rgb(), col.counts
+
+
+def _legacy_cam_face_colors(shape, spec: PartSpec) -> tuple[dict[tuple[float, float, float], list], dict[str, int]]:
+    """v1.0: bore faces of threaded holes (blue) and tight-tolerance holes (red). Kept for reference."""
     from app.services.cad_compiler import face_frames
 
     frames = face_frames(spec)
@@ -513,13 +550,18 @@ def cam_face_colors(shape, spec: PartSpec) -> tuple[dict[tuple[float, float, flo
 # --------------------------------------------------------------------------- #
 
 
-def export_glb(shape, path: Path, tolerance: float = 0.02, angular_tolerance: float = 0.15) -> Path:
-    """Tessellate the B-Rep and write a Y-up glTF binary (the viewer rotates back to Z-up)."""
+def export_glb(shape, path: Path, tolerance: float = 0.02, angular_tolerance: float = 0.15, coloring=None) -> Path:
+    """Tessellate the B-Rep and write a Y-up glTF binary (the viewer rotates back to Z-up).
+
+    With ``coloring`` (step_xcaf_exporter.FaceColoring) every face carries the same CAM colour as in model.step
+    (vertex colours, COLOR_0); other faces get the body colour (SPEC_V1_5 §2.2 preview sync)."""
     import trimesh
 
     tol = max(tolerance, shape.bounding_box().diagonal / 4000.0)
     # Tessellate face by face and keep vertices un-merged between B-Rep faces: normals stay smooth on
     # cylinders but sharp on every CAD edge (merging would smear the shading across edges).
+    colored = coloring.face_rgb() if coloring is not None else []
+    body = coloring.body_rgb if coloring is not None else None
     parts = []
     for face in shape.faces():
         verts, tris = face.tessellate(tol, angular_tolerance)
@@ -528,6 +570,9 @@ def export_glb(shape, path: Path, tolerance: float = 0.02, angular_tolerance: fl
         m = trimesh.Trimesh(vertices=np.array([[p.X, p.Y, p.Z] for p in verts], dtype=np.float64),
                             faces=np.array(tris, dtype=np.int64), process=False)
         m.merge_vertices()  # within one face only
+        if body is not None:
+            rgb = next((c for f, c in colored if f.IsSame(face.wrapped)), body)
+            m.visual.vertex_colors = np.tile(np.array([*rgb, 255], dtype=np.uint8), (len(m.vertices), 1))
         parts.append(m)
     mesh = trimesh.util.concatenate(parts)  # triangle winding already follows each face's orientation
     mesh.apply_transform(np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=float))

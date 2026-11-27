@@ -4,6 +4,7 @@ import type { JobDetail, JobSummary, PipelineEvent } from '../types/partSpec'
 import DfmWarningsPanel from './DfmWarningsPanel'
 import FeatureEditor from './FeatureEditor'
 import IsoDrawing from './IsoDrawing'
+import VerifyButton from './VerifyButton'
 import MissingDimensionsModal from './MissingDimensionsModal'
 import StepImportNote from './StepImportNote'
 import JobList from './JobList'
@@ -45,6 +46,7 @@ interface Props {
   onDelete: () => void
   onRebuilt: (d: JobDetail) => void
   onReextract: () => void
+  onReload: () => void
   renderTick: number
   pdfUrl?: string
   sourceToggle: ReactNode
@@ -183,6 +185,14 @@ export default function MobileShell(p: Props) {
 
             {(art['model.step'] || art['drawing.pdf']) && (
               <IsoDrawing variant="card" job={job} running={p.running} tick={p.renderTick} onGenerated={p.onDrawing} />
+            )}
+
+            {art['model.step'] && (
+              <div className="grid grid-cols-2 gap-2">
+                {art['setup_sheet.pdf'] && <a className="btn" href={art['setup_sheet.pdf']} target="_blank" rel="noreferrer">Instelblad</a>}
+                <a className="btn" href={`/shopfloor/${job.job_id}`}>Werkplaatsweergave</a>
+                <div className="col-span-2 grid"><VerifyButton job={job} running={p.running} onDone={p.onReload} /></div>
+              </div>
             )}
 
             <PipelineProgress job={job} events={p.events} live={p.live} iterations={job.iteration_logs} compact />

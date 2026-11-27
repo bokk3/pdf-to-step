@@ -43,7 +43,8 @@ STAGES = ("queued", "parsing_pdf", "extracting_features", "awaiting_dimensions",
           "retrying", "ready", "failed")
 TERMINAL = ("ready", "failed", "awaiting_dimensions")  # awaiting_dimensions: paused until PATCH /spec
 DRAWING_FILES = ("drawing.pdf", "drawing.svg", "drawing.dxf", "drawing.json")
-CURRENT_FILES = ("model.step", "preview.glb", "ortho_check.png", "dfm_report.json") + DRAWING_FILES
+SHOP_FILES = ("setup_sheet.pdf", "cam_colors.json")  # v1.5
+CURRENT_FILES = ("model.step", "preview.glb", "ortho_check.png", "dfm_report.json") + DRAWING_FILES + SHOP_FILES
 
 
 # --------------------------------------------------------------------------- #
@@ -68,8 +69,37 @@ def cad_warmup(render: bool = False) -> float:
     return time.monotonic() - t0
 
 
+def _qr(public_url: str, job_id: str) -> str | None:
+    base = (public_url or "").strip().rstrip("/")
+    return f"{base}/shopfloor/{job_id}" if base else None
+
+
+def render_setup_sheet(shape, spec: PartSpec, vdir: Path, job_id: str, version: int, s: Settings,
+                       report: DFMReport | None = None) -> Path:
+    """v1.5 §2.3: 1-page A4 setup sheet next to model.step (report: this version's DFM v2 report)."""
+    from app.services.setup_sheet import generate_setup_sheet
+    from app.services.step_xcaf_exporter import load_palette
+
+    if report is None and (vdir / "dfm_report.json").exists():
+        report = DFMReport.model_validate_json((vdir / "dfm_report.json").read_text(encoding="utf-8"))
+    return generate_setup_sheet(
+        spec, shape, report, vdir / "setup_sheet.pdf", job_id=job_id, version=version,
+        drawing_number=spec.drawing_metadata.drawing_number or f"PTS-{job_id[:8].upper()}",
+        qr_url=_qr(s.public_tailscale_url, job_id), palette=load_palette(s))
+
+
+def cad_setup_sheet(job_dir: str, version: int, spec_json: str, settings_data: dict) -> str:
+    """POST /setup-sheet: (re)generate from the version's STEP + DFM report."""
+    from build123d import import_step
+
+    jd = Path(job_dir)
+    vdir = jd / "versions" / f"v{version}"
+    return str(render_setup_sheet(import_step(str(vdir / "model.step")), PartSpec.model_validate_json(spec_json), vdir,
+                                  jd.name, version, Settings(**settings_data)))
+
+
 def render_drawing(shape, spec: PartSpec, vdir: Path, job_id: str, version: int, owner: str = "",
-                   overrides: dict | None = None) -> dict[str, Any]:
+                   overrides: dict | None = None, public_url: str = "") -> dict[str, Any]:
     """EN ISO detail drawing (PDF/SVG/DXF) of one version; meta goes to drawing.json."""
     from app.services.drawing_engine import get_engine
 
@@ -84,21 +114,23 @@ def render_drawing(shape, spec: PartSpec, vdir: Path, job_id: str, version: int,
     res = get_engine(o.get("engine")).render(
         spec, shape, vdir, sheet_size=o.get("sheet_size"), scale=o.get("scale"), language=o.get("language"),
         drawing_number=spec.drawing_metadata.drawing_number or f"PTS-{job_id[:8].upper()}", owner=owner, mass_g=mass,
-        section_view=o.get("section_view"))
+        section_view=o.get("section_view"), qr_url=_qr(public_url, job_id))
     info = {"version": version, "sheet_size": res.sheet_size, "scale": res.scale, "warnings": res.warnings,
             "balloons": res.balloons, "overrides": o, "duration_s": round(time.monotonic() - t, 3)}
     (vdir / "drawing.json").write_text(json.dumps(info, indent=1), encoding="utf-8")
     return info
 
 
-def cad_drawing(job_dir: str, version: int, spec_json: str, overrides: dict | None, owner: str) -> dict[str, Any]:
+def cad_drawing(job_dir: str, version: int, spec_json: str, overrides: dict | None, owner: str,
+                public_url: str = "") -> dict[str, Any]:
     """(Re)generate the drawing of a built version from its STEP (POST /drawing, deferred renders)."""
     from build123d import import_step
 
     jd = Path(job_dir)
     vdir = jd / "versions" / f"v{version}"
     shape = import_step(str(vdir / "model.step"))
-    return render_drawing(shape, PartSpec.model_validate_json(spec_json), vdir, jd.name, version, owner, overrides)
+    return render_drawing(shape, PartSpec.model_validate_json(spec_json), vdir, jd.name, version, owner, overrides,
+                          public_url)
 
 
 def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, render: bool,
@@ -111,7 +143,6 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     from app.services.cad_sandbox import load_brep, run_build123d_code
     from app.services.verifier import (
         build_report,
-        cam_face_colors,
         drawing_callout_texts,
         export_glb,
         render_orthographic,
@@ -151,18 +182,27 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     export_errors: list[str] = []
     color_counts: dict[str, int] = {}
     t = time.monotonic()
+    coloring = None
     try:
-        colors: dict = {}
-        if s.step_face_colors:
-            colors, color_counts = cam_face_colors(shape, spec)
-        export_step_file(shape, vdir / "model.step", schema=s.step_schema, face_colors=colors or None)
+        if s.step_face_colors and s.enable_xcaf_cam_colors:  # v1.5 §2.2: AP214 CAM colours from cam_colors.json
+            from app.services.step_xcaf_exporter import classify_faces, export_colored_step, load_palette
+
+            coloring = classify_faces(shape, spec, load_palette(s))
+            color_counts = coloring.counts
+            export_colored_step(shape, vdir / "model.step", coloring, schema=s.step_schema,
+                                name=spec.part_name or "part")
+            (vdir / "cam_colors.json").write_text(json.dumps(
+                {"counts": color_counts, "palette": coloring.palette.model_dump(mode="json")}, indent=1),
+                encoding="utf-8")
+        else:
+            export_step_file(shape, vdir / "model.step", schema=s.step_schema)
         files["model.step"] = "model.step"
     except Exception as exc:  # noqa: BLE001
         export_errors.append(f"STEP-export mislukt: {exc}")
     timings["step"] = time.monotonic() - t
     t = time.monotonic()
     try:
-        export_glb(shape, vdir / "preview.glb")
+        export_glb(shape, vdir / "preview.glb", coloring=coloring)
         files["preview.glb"] = "preview.glb"
     except Exception as exc:  # noqa: BLE001
         export_errors.append(f"GLB-export mislukt: {exc}")
@@ -187,12 +227,20 @@ def cad_build(job_dir: str, version: int, spec_json: str, settings_data: dict, r
     if render and s.drawing_enabled:  # a drawing failure never fails the gate
         t = time.monotonic()
         try:
-            drawing = render_drawing(shape, spec, vdir, jd.name, version, s.drawing_owner)
+            drawing = render_drawing(shape, spec, vdir, jd.name, version, s.drawing_owner,
+                                     public_url=s.public_tailscale_url)
             files.update({n: n for n in DRAWING_FILES})
         except Exception as exc:  # noqa: BLE001
             log.warning("drawing failed for %s v%s: %s", jd.name, version, exc)
             drawing = {"error": f"{type(exc).__name__}: {exc}"}
         timings["drawing"] = time.monotonic() - t
+        t = time.monotonic()
+        try:  # v1.5 §2.3 setup sheet (needs this build's DFM v2 report)
+            render_setup_sheet(shape, spec, vdir, jd.name, version, s, report)
+            files["setup_sheet.pdf"] = "setup_sheet.pdf"
+        except Exception as exc:  # noqa: BLE001
+            log.warning("setup sheet failed for %s v%s: %s", jd.name, version, exc)
+        timings["setup_sheet"] = time.monotonic() - t
     timings["total"] = time.monotonic() - t0
     return {"report": report.model_dump(mode="json"), "files": files, "export_errors": export_errors,
             "warnings": build_warnings, "complex_logs": complex_logs, "timings": timings, "drawing": drawing}
@@ -206,7 +254,8 @@ def step_analyze(job_dir: str, name: str) -> dict[str, Any]:
     return {"spec_json": a.spec.model_dump_json(), "summary": a.summary()}
 
 
-def cad_render(job_dir: str, version: int, title: str, spec_json: str | None = None, owner: str = "") -> dict[str, Any]:
+def cad_render(job_dir: str, version: int, title: str, spec_json: str | None = None, owner: str = "",
+               settings_data: dict | None = None) -> dict[str, Any]:
     """Deferred ortho renders (+ drawing when `spec_json` is given) for a version built without them (PATCH /spec)."""
     from build123d import import_step
 
@@ -218,7 +267,12 @@ def cad_render(job_dir: str, version: int, title: str, spec_json: str | None = N
     files = {p.name: p.name for p in render_orthographic(shape, vdir, title=title).values()}
     if spec_json:
         try:
-            render_drawing(shape, PartSpec.model_validate_json(spec_json), vdir, jd.name, version, owner)
+            s = Settings(**settings_data) if settings_data else None
+            spec = PartSpec.model_validate_json(spec_json)
+            render_drawing(shape, spec, vdir, jd.name, version, owner, public_url=s.public_tailscale_url if s else "")
+            if s is not None:
+                render_setup_sheet(shape, spec, vdir, jd.name, version, s)
+                files["setup_sheet.pdf"] = "setup_sheet.pdf"
             files.update({n: n for n in DRAWING_FILES})
         except Exception as exc:  # noqa: BLE001
             log.warning("deferred drawing failed for %s v%s: %s", jd.name, version, exc)
@@ -242,6 +296,10 @@ class Pipeline:
         self.render_executor = executor_factory(1) if executor_factory else None
         self._tasks: dict[str, asyncio.Task] = {}
         self._bg: set[asyncio.Task] = set()
+        # v1.5 batches: at most MAX_CONCURRENT_JOBS child pipelines at once (RAM/CPU of OCCT + DeepSeek)
+        self.batch_slots = asyncio.Semaphore(settings.max_concurrent_jobs)
+        self.batch_active = 0
+        self.batch_peak = 0
 
     # -- paths / versions --------------------------------------------------------
     def job_dir(self, job_id: str) -> Path:
@@ -396,7 +454,12 @@ class Pipeline:
     async def patch_spec(self, job_id: str, spec: PartSpec) -> dict[str, Any]:
         """Stage 6: synchronous deterministic rebuild (no LLM). Returns the new version's result."""
         t0 = time.monotonic()
+        prev = self.history(job_id)
         version = self.save_spec(job_id, spec, source="user_edit", reason="operator edit (PATCH /spec)")
+        from app.services import telemetry  # v1.5 §2.6: silent diff against the AI reading
+
+        before = self.load_spec(job_id, prev[-1]["version"]).model_dump(mode="json") if prev else None
+        await telemetry.record(self.store, job_id, version, "edit", spec.model_dump(mode="json"), before)
         if spec.blocking_missing:
             await self._await_dimensions(job_id, version, spec)
             return {"version": version, "status": "awaiting_dimensions", "result": {},
@@ -676,6 +739,7 @@ class Pipeline:
     # ================================================================================
 
     async def _finish(self, job_id: str, version: int, result: dict[str, Any], critic) -> str:
+        await self._snapshot_if_ai(job_id, version)
         jd = self.job_dir(job_id)
         vdir = jd / "versions" / f"v{version}"
         if "fatal" in result or "model.step" not in result.get("files", {}):
@@ -720,8 +784,17 @@ class Pipeline:
             "drawing": result.get("drawing"),
         }
 
+    async def _snapshot_if_ai(self, job_id: str, version: int) -> None:
+        """v1.5 §2.6: the latest AI-sourced revision is the baseline the operator's corrections are measured against."""
+        from app.services import telemetry
+
+        src = next((h["source"] for h in self.history(job_id) if h["version"] == version), None)
+        if src in telemetry.AI_SOURCES:
+            await telemetry.snapshot_ai(self.store, job_id, self.spec_path(job_id, version).read_text(encoding="utf-8"))
+
     async def _await_dimensions(self, job_id: str, version: int, spec: PartSpec) -> None:
         """DRAWING_SPEC §5: blocking missing dimensions pause the job before any CAD / drawing work."""
+        await self._snapshot_if_ai(job_id, version)
         missing = spec.blocking_missing
         await self.store.update_job(job_id, current_version=version, error=None)
         await self.emit(job_id, "awaiting_dimensions",
@@ -743,8 +816,8 @@ class Pipeline:
         try:
             spec_json = spec.model_dump_json() if self.s.drawing_enabled else None
             await self._run_pool(cad_render, str(self.job_dir(job_id)), version, spec.part_name or "", spec_json,
-                                 self.s.drawing_owner, render=True)
-            await self._promote(job_id, version, ("ortho_check.png",) + DRAWING_FILES)
+                                 self.s.drawing_owner, self.s.model_dump(mode="json"), render=True)
+            await self._promote(job_id, version, ("ortho_check.png",) + DRAWING_FILES + SHOP_FILES)
             await self.emit(job_id, "verifying", f"Ortho-aanzichten en ISO-tekening v{version} bijgewerkt", None,
                             set_status=False, data={"version": version, "renders": True, "drawing": True})
         except Exception as exc:  # noqa: BLE001
@@ -754,11 +827,20 @@ class Pipeline:
         """POST /drawing: (re)generate the EN ISO drawing of a built version with optional overrides."""
         spec = self.load_spec(job_id, version)
         info = await self._run_pool(cad_drawing, str(self.job_dir(job_id)), version, spec.model_dump_json(),
-                                    overrides, self.s.drawing_owner, render=True)
+                                    overrides, self.s.drawing_owner, self.s.public_tailscale_url, render=True)
         await self._promote(job_id, version, DRAWING_FILES)
         await self.emit(job_id, "verifying", f"ISO-tekening v{version}: {info['sheet_size'].replace('_LANDSCAPE', '')} "
                         f"{info['scale']}", None, set_status=False, data={"version": version, "drawing": info})
         return info
+
+    async def regenerate_setup_sheet(self, job_id: str, version: int) -> None:
+        """POST /setup-sheet (v1.5): rebuild setup_sheet.pdf of a built version."""
+        spec = self.load_spec(job_id, version)
+        await self._run_pool(cad_setup_sheet, str(self.job_dir(job_id)), version, spec.model_dump_json(),
+                             self.s.model_dump(mode="json"), render=True)
+        await self._promote(job_id, version, ("setup_sheet.pdf",))
+        await self.emit(job_id, "verifying", f"Instelblad v{version} bijgewerkt", None, set_status=False,
+                        data={"version": version, "setup_sheet": True})
 
     async def _fail(self, job_id: str, message: str, tb: str | None = None) -> None:
         await self.store.update_job(job_id, error=message[:4000])

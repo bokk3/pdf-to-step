@@ -1,0 +1,14 @@
+{
+ "schema_version": "1.0",
+ "tight_max_it": 7,
+ "tight_max_band_mm": 0.04,
+ "fine_finish_max_ra_um": 1.6,
+ "colors": {
+  "thread": {"name": "Royal Blue", "rgb": [0, 102, 255], "meaning": "Tap / thread mill required"},
+  "tight_fit": {"name": "Signal Red", "rgb": [230, 30, 30], "meaning": "Ream / bore / precision finish"},
+  "fine_finish": {"name": "Amber Yellow", "rgb": [245, 190, 0], "meaning": "Finishing pass required"},
+  "seat": {"name": "Purple", "rgb": [148, 66, 224], "meaning": "Secondary seating operation"},
+  "datum": {"name": "Emerald Green", "rgb": [30, 180, 90], "meaning": "Datum / flatness reference"},
+  "body": {"name": "Neutral Gray", "rgb": [185, 190, 196], "meaning": "General ISO 2768-mK"}
+ }
+}

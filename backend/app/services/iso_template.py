@@ -23,11 +23,13 @@ from pathlib import Path
 
 MM = 72 / 25.4  # PDF points per millimetre
 
-SHEETS: dict[str, tuple[float, float]] = {"A4_LANDSCAPE": (297.0, 210.0), "A3_LANDSCAPE": (420.0, 297.0)}
+SHEETS: dict[str, tuple[float, float]] = {"A4_LANDSCAPE": (297.0, 210.0), "A3_LANDSCAPE": (420.0, 297.0),
+                                         "A4_PORTRAIT": (210.0, 297.0)}  # portrait: setup sheet (v1.5)
 MARGIN_LEFT = 20.0  # binding edge
 MARGIN = 10.0
 FRAME_WIDTH = 0.7
 TB_W, TB_H = 180.0, 40.0  # ISO 7200 title block (width fixed by the norm; rows 14 / 13 / 13 mm)
+QR_CELL = 26.0  # shopfloor QR cell, bottom-left of the title block (v1.5)
 
 TEXT_DIM = 3.5  # primary dimensions / callouts
 TEXT_SMALL = 2.5  # minimum on A4 (ISO 3098)
@@ -43,7 +45,10 @@ class LineGroup:
     thin: float
 
 
-LINE_GROUPS = {"A4_LANDSCAPE": LineGroup(0.35, 0.18), "A3_LANDSCAPE": LineGroup(0.5, 0.25)}
+LINE_GROUPS = {"A4_LANDSCAPE": LineGroup(0.35, 0.18), "A3_LANDSCAPE": LineGroup(0.5, 0.25),
+               "A4_PORTRAIT": LineGroup(0.35, 0.18)}
+RGB = tuple[float, float, float]
+BLACK: RGB = (0.0, 0.0, 0.0)
 
 
 def dash_pattern(style: str, d: float) -> list[float]:
@@ -138,12 +143,14 @@ class Stroke:
     style: str = "solid"  # solid | hidden | center | phantom
     layer: str = "VISIBLE"
     closed: bool = False
+    color: RGB = BLACK
 
 
 @dataclass
 class Fill:
     pts: list[Pt]
     layer: str = "DIMENSIONS"
+    color: RGB = BLACK
 
 
 @dataclass
@@ -155,6 +162,11 @@ class Text:
     anchor: str = "start"  # start | middle | end  (along the text direction)
     rotation: int = 0  # 0 or 90 (counter-clockwise: reads bottom-to-top)
     layer: str = "TEXT"
+    color: RGB = BLACK
+
+
+def _hex(c: RGB) -> str:
+    return "#" + "".join(f"{int(round(v * 255)):02x}" for v in c)
 
 
 def boxes_overlap(a: Box, b: Box, pad: float = 0.0) -> bool:
@@ -180,9 +192,14 @@ class Sheet:
 
     # -- primitives -------------------------------------------------------------
     def polyline(self, pts: list[Pt], width: float | None = None, style: str = "solid", layer: str = "VISIBLE",
-                 closed: bool = False) -> None:
+                 closed: bool = False, color: RGB = BLACK) -> None:
         if len(pts) >= 2:
-            self.strokes.append(Stroke(list(pts), width if width is not None else self.lines.thin, style, layer, closed))
+            self.strokes.append(Stroke(list(pts), width if width is not None else self.lines.thin, style, layer, closed,
+                                       color))
+
+    def fill(self, pts: list[Pt], layer: str = "DIMENSIONS", color: RGB = BLACK) -> None:
+        if len(pts) >= 3:
+            self.fills.append(Fill(list(pts), layer, color))
 
     def line(self, a: Pt, b: Pt, **kw) -> None:
         self.polyline([a, b], **kw)
@@ -205,8 +222,8 @@ class Sheet:
         self.fills.append(Fill([tip, (bx - uy * w, by + ux * w), (bx + uy * w, by - ux * w)], layer))
 
     def text(self, s: str, x: float, y: float, size: float = TEXT_DIM, anchor: str = "start", rotation: int = 0,
-             layer: str = "TEXT") -> Box:
-        t = Text(s, x, y, size, anchor, rotation, layer)
+             layer: str = "TEXT", color: RGB = BLACK) -> Box:
+        t = Text(s, x, y, size, anchor, rotation, layer, color)
         self.texts.append(t)
         return self.text_box(t)
 
@@ -228,10 +245,10 @@ class Sheet:
         doc = pymupdf.open()
         page = doc.new_page(width=self.w * MM, height=self.h * MM)
         page.insert_font(fontname="iso", fontfile=self.font.path)
-        groups: dict[tuple[float, str, bool], list[Stroke]] = {}
+        groups: dict[tuple[float, str, bool, RGB], list[Stroke]] = {}
         for s in self.strokes:
-            groups.setdefault((s.width, s.style, s.closed), []).append(s)
-        for (width, style, closed), strokes in groups.items():
+            groups.setdefault((s.width, s.style, s.closed, s.color), []).append(s)
+        for (width, style, closed, color), strokes in groups.items():
             shape = page.new_shape()
             for s in strokes:
                 shape.draw_polyline([pymupdf.Point(x * MM, y * MM) for x, y in s.pts])
@@ -240,20 +257,20 @@ class Sheet:
                                     pymupdf.Point(s.pts[0][0] * MM, s.pts[0][1] * MM))
             pattern = dash_pattern(style, width)
             dashes = "[" + " ".join(f"{v * MM:.3f}" for v in pattern) + "] 0" if pattern else None
-            shape.finish(color=(0, 0, 0), width=width * MM, dashes=dashes, closePath=False, lineCap=0, lineJoin=1)
+            shape.finish(color=color, width=width * MM, dashes=dashes, closePath=False, lineCap=0, lineJoin=1)
             shape.commit()
         if self.fills:
             shape = page.new_shape()
             for f in self.fills:
                 shape.draw_polyline([pymupdf.Point(x * MM, y * MM) for x, y in f.pts])
-                shape.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0.05 * MM, closePath=True)
+                shape.finish(color=f.color, fill=f.color, width=0.05 * MM, closePath=True)
             shape.commit()
         for t in self.texts:
             w = self.font.width(t.text, t.size)
             off = {"start": 0.0, "middle": -w / 2, "end": -w}[t.anchor]
             x, y = (t.x, t.y - off) if t.rotation == 90 else (t.x + off, t.y)
             page.insert_text(pymupdf.Point(x * MM, y * MM), t.text, fontname="iso", fontsize=self.font.em(t.size) * MM,
-                             rotate=t.rotation, color=(0, 0, 0))
+                             rotate=t.rotation, color=t.color)
         doc.set_metadata({"creator": "pdf-to-step drawing_engine", "producer": "PyMuPDF", **(metadata or {})})
         try:
             doc.subset_fonts()
@@ -277,10 +294,10 @@ class Sheet:
             tag = "polygon" if s.closed else "polyline"
             pattern = dash_pattern(s.style, s.width)
             dash = f' stroke-dasharray="{" ".join(f"{v:.3f}" for v in pattern)}"' if pattern else ""
-            add(s.layer, f'<{tag} points="{pts}" fill="none" stroke="#000" stroke-width="{s.width}"{dash}/>')
+            add(s.layer, f'<{tag} points="{pts}" fill="none" stroke="{_hex(s.color)}" stroke-width="{s.width}"{dash}/>')
         for f in self.fills:
             pts = " ".join(f"{x:.3f},{y:.3f}" for x, y in f.pts)
-            add(f.layer, f'<polygon points="{pts}" fill="#000"/>')
+            add(f.layer, f'<polygon points="{pts}" fill="{_hex(f.color)}"/>')
         fam = escape(f"{self.font.family}, osifont, ISOCPEUR, DejaVu Sans, sans-serif", {'"': "&quot;"})
         for t in self.texts:
             anchor = {"start": "start", "middle": "middle", "end": "end"}[t.anchor]
@@ -386,15 +403,20 @@ def title_block(sheet: Sheet, values: dict[str, str], language: str = "EN") -> N
     t = sheet.lines.thick
     sheet.rect(sheet.title_block, width=t, layer="TITLEBLOCK")
     rows = [y0, y0 + 14, y0 + 27, y1]
-    for y in rows[1:-1]:
-        sheet.line((x0, y), (x1, y), width=sheet.lines.thin, layer="TITLEBLOCK")
+    sheet.line((x0, rows[1]), (x1, rows[1]), width=sheet.lines.thin, layer="TITLEBLOCK")
+    sheet.line((x0 + QR_CELL, rows[2]), (x1, rows[2]), width=sheet.lines.thin, layer="TITLEBLOCK")
+    # v1.5 §2.4: shopfloor QR in the bottom-left cell (rows 2-3)
+    from app.services.qr_helper import draw_qr
+
+    draw_qr(sheet, values.get("qr_url"), x0 + 1.0, rows[1] + 1.0, QR_CELL - 2.0)
     layout = [
         [("title", 0, 115, TEXT_TITLE), ("drawing_no", 115, 180, 4.5)],
-        [("material", 0, 45, TEXT_SMALL + 0.5), ("gen_tol", 45, 80, TEXT_SMALL + 0.5), ("surface", 80, 112, TEXT_SMALL),
-         ("scale", 112, 130, TEXT_DIM), ("projection", 130, 162, 0), ("rev", 162, 180, TEXT_DIM)],
-        [("drawn", 0, 23, TEXT_SMALL), ("checked", 23, 53, TEXT_SMALL), ("date", 53, 75, TEXT_SMALL),
-         ("units", 75, 92, TEXT_SMALL + 0.5), ("mass", 92, 112, TEXT_SMALL), ("status", 112, 138, TEXT_DIM),
-         ("sheet", 138, 154, TEXT_SMALL + 0.5), ("owner", 154, 180, TEXT_SMALL)],
+        [("material", 26, 62, TEXT_SMALL + 0.5), ("gen_tol", 62, 93, TEXT_SMALL + 0.5), ("surface", 93, 115, TEXT_SMALL),
+         ("scale", 115, 131, TEXT_DIM), ("projection", 131, 164, 0), ("rev", 164, 180, TEXT_DIM)],
+        # widths fitted to the measured 2.5 mm labels (GECONTROLEERD, EIGENAAR ...) and typical values
+        [("drawn", 26, 45.5, TEXT_SMALL), ("checked", 45.5, 76.5, TEXT_SMALL), ("date", 76.5, 97, TEXT_SMALL),
+         ("units", 97, 113.5, TEXT_SMALL + 0.5), ("mass", 113.5, 127.5, TEXT_SMALL), ("status", 127.5, 147.5, TEXT_DIM),
+         ("sheet", 147.5, 160, TEXT_SMALL + 0.5), ("owner", 160, 180, TEXT_SMALL)],
     ]
     for r, cells in enumerate(layout):
         ry0, ry1 = rows[r], rows[r + 1]

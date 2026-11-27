@@ -44,3 +44,17 @@ def make_spec(features: list[dict] | None = None, L: float = 100.0, W: float = 6
     return PartSpec.model_validate(
         {"stock": {"length_x": L, "width_y": W, "thickness_z": T}, "features": features or [], **extra}
     )
+
+
+@pytest.fixture
+def client_factory(settings):
+    """``with client_factory() as c:`` - the app on the temp data dir with the offline mock LLM."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+    from app.services.deepseek_client import MockDeepSeekClient
+
+    def make(llm=None):
+        return TestClient(create_app(settings, llm=llm or MockDeepSeekClient([FIXTURES]), use_process_pool=False))
+
+    return make

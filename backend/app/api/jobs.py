@@ -21,7 +21,8 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MEDIA = {".pdf": "application/pdf", ".glb": "model/gltf-binary", ".png": "image/png", ".json": "application/json",
          ".step": "application/step", ".txt": "text/plain", ".svg": "image/svg+xml", ".dxf": "image/vnd.dxf"}
 VERSIONED = {"model.step", "preview.glb", "ortho_check.png", "ortho_top.png", "ortho_front.png", "ortho_right.png",
-             "ortho_iso.png", "dfm_report.json", "drawing.pdf", "drawing.svg", "drawing.dxf", "drawing.json"}
+             "ortho_iso.png", "dfm_report.json", "drawing.pdf", "drawing.svg", "drawing.dxf", "drawing.json",
+             "setup_sheet.pdf", "cam_colors.json"}
 
 
 def _store(request: Request) -> JobStore:
@@ -58,6 +59,9 @@ def _summary(pipeline: Pipeline, job: dict[str, Any]) -> dict[str, Any]:
                                "current_version", "error")}
     out["job_id"] = job["id"]
     out["running"] = pipeline.is_running(job["id"])
+    out["verified_at"] = job.get("verified_at")
+    out["batch_id"] = job.get("batch_id")
+    out["part_number"] = job.get("part_number")
     res = job.get("result") or {}
     out["dfm"] = ({k: res.get(k) for k in ("passed", "errors", "warnings", "needs_review", "ambiguities")}
                   if res else None)
@@ -207,6 +211,24 @@ async def patch_spec(request: Request, job_id: str, body: dict[str, Any] = Body(
     return JSONResponse(detail)
 
 
+@router.post("/jobs/{job_id}/verify")
+async def verify(request: Request, job_id: str) -> dict:
+    """"Mark verified" (v1.5 §2.6): the operator confirms the current PartSpec; logs the diff to the AI reading."""
+    from app.services import telemetry
+
+    job = await _require_job(request, job_id)
+    pipeline = _pipeline(request)
+    v = job["current_version"]
+    if not v:
+        raise HTTPException(409, "job has no PartSpec yet")
+    spec = pipeline.load_spec(job_id, v).model_dump(mode="json")
+    diff = await telemetry.record(_store(request), job_id, v, "verified", spec, spec)
+    import time
+
+    await _store(request).update_job(job_id, verified_at=time.time())
+    return {"job_id": job_id, "version": v, "verified": True, "diff": diff}
+
+
 class ReextractRequest(BaseModel):
     hint: str | None = None
 
@@ -256,6 +278,10 @@ async def get_artifact(request: Request, job_id: str, filename: str, version: in
     stem, v = Path(job["filename"]).stem, version or job["current_version"]
     if filename == "model.step":
         kwargs["filename"] = f"{stem}_v{v}.step"
+    elif filename == "setup_sheet.pdf":
+        kwargs["filename"] = f"{stem}_v{v}_instelblad.pdf"
+        if not download:
+            kwargs["content_disposition_type"] = "inline"
     elif filename in ("drawing.pdf", "drawing.svg", "drawing.dxf"):
         kwargs["filename"] = f"{stem}_v{v}_ISO{p.suffix}"
         if not download and p.suffix != ".dxf":  # PDF / SVG open in the browser, with a sensible save-as name

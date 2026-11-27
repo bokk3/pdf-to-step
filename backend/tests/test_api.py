@@ -69,7 +69,7 @@ def test_upload_to_ready_with_traceability(client, fixtures_dir: Path, settings)
     assert job["part_spec"]["part_name"] == "BRK-120-A Mounting plate"
     assert job["dfm_report"]["passed"] is True
     assert not [i for i in job["dfm_report"]["issues"] if i["code"] == "CALLOUT_UNMATCHED"]
-    assert job["dfm_report"]["colored_faces"] == {"thread": 2, "tight_tolerance": 1}
+    assert job["dfm_report"]["colored_faces"] == {"thread": 2, "tight_fit": 1, "seat": 9, "datum": 1}
     assert job["iteration_logs"][0]["gate_passed"] is True
     assert set(job["artifacts"]) >= {"original.pdf", "model.step", "preview.glb", "ortho_check.png", "dfm_report.json"}
 

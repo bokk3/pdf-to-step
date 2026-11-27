@@ -140,6 +140,20 @@ async def generate_drawing(request: Request, job_id: str, body: DrawingRequest |
     return {**info, "artifacts": _artifact_urls(pipeline, job_id, v)}
 
 
+@router.post("/jobs/{job_id}/setup-sheet")
+async def generate_setup_sheet(request: Request, job_id: str, version: int | None = None) -> dict:
+    """v1.5 §2.5: (re)generate the A4 setup sheet (instelblad) of the current (or given) built version."""
+    job = await _require_job(request, job_id)
+    pipeline = _pipeline(request)
+    v = version or job["current_version"]
+    if not v or not (pipeline.job_dir(job_id) / "versions" / f"v{v}" / "model.step").exists():
+        raise HTTPException(409, "deze versie heeft nog geen STEP-model")
+    try:
+        await pipeline.regenerate_setup_sheet(job_id, v)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(500, f"instelblad mislukt: {type(exc).__name__}: {exc}") from exc
+    return {"job_id": job_id, "version": v, "artifacts": _artifact_urls(pipeline, job_id, v)}
+
 @router.get("/drawing-engines")
 async def drawing_engines() -> list[dict]:
     """DRAWING_SPEC §4: engines behind the DrawingEngine protocol and whether they can be used here."""

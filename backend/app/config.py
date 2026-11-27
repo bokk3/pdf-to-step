@@ -66,6 +66,15 @@ class Settings(BaseSettings):
     dfm_max_pocket_depth_per_radius: float = 4.0
     dfm_min_wall_mm: float = 1.5
 
+    # --- v1.5 shopfloor (SPEC_V1_5_CAM_SHOPFLOOR.md) ----------------------------------
+    dfm_tool_checks: bool = Field(True, description="DFM v2: check features against data/config/tools.json")
+    stock_advisor: bool = Field(True, description="raw blank + masses from data/config/stock_catalog.json")
+    public_tailscale_url: str = Field("", description="QR codes point to <this>/shopfloor/<job_id>")
+    max_concurrent_jobs: int = Field(2, ge=1, le=16, description="AI pipelines running at once (batches)")
+    batch_part_number_regex: str = Field("", description="extra part-number regexes (group 1), '||'-separated; empty = built-in")
+    batch_sheet_regex: str = Field("", description="sheet indicator regex (groups: index, count); empty = built-in")
+    enable_xcaf_cam_colors: bool = Field(True, description="AP214 face colours from data/config/cam_colors.json")
+
     @field_validator("host")
     @classmethod
     def _loopback_only(cls, v: str) -> str:

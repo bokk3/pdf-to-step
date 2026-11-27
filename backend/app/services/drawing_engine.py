@@ -750,7 +750,7 @@ def _edge_note(et, dec: str) -> str:
 def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | None = None, scale: str | None = None,
                      language: str | None = None, drawing_number: str | None = None, mass_g: float | None = None,
                      owner: str = "", font_path: str | None = None, basename: str = "drawing",
-                     section_view: str | None = None) -> DrawingResult:
+                     section_view: str | None = None, qr_url: str | None = None) -> DrawingResult:
     """Render the EN ISO detail drawing of `shape` (compiled from `spec`) to PDF, SVG and DXF."""
     font = get_font(font_path)
     dm = spec.drawing_metadata
@@ -821,7 +821,7 @@ def generate_drawing(spec: PartSpec, shape, out_dir: Path, *, sheet_size: str | 
         "material": spec.material or "", "gen_tol": spec.general_tolerance or "ISO 2768-mK",
         "surface": dm.surface_finish.split(" (")[0], "scale": layout.scale_label, "rev": dm.revision,
         "drawn": dm.drawn_by, "checked": dm.checked_by, "date": dt.date.today().isoformat(), "units": "mm",
-        "mass": f"{mass_g:.0f} g" if mass_g else "", "status": dm.approval_status, "sheet": "1/1", "owner": owner,
+        "mass": f"{mass_g:.0f} g" if mass_g else "", "status": dm.approval_status, "sheet": "1/1", "owner": owner, "qr_url": qr_url,
     }, lang)
     obs.add(forbidden)
     _draw_views(sh, layout, views)

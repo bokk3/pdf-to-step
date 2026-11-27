@@ -288,6 +288,9 @@ export interface JobSummary {
   error?: string | null
   running: boolean
   dfm: { passed: boolean; errors: number; warnings: number; needs_review: boolean; ambiguities: number } | null
+  verified_at?: number | null
+  batch_id?: string | null
+  part_number?: string | null
 }
 
 export interface SpecVersion {

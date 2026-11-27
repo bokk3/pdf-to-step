@@ -6,7 +6,7 @@ Each version has its own contract document; this file tracks what is built. Stat
 |---|---|---|---|
 | v1.0 | [ARCHITECTURE.md](ARCHITECTURE.md) | PDF → PartSpec → native B-Rep STEP, DFM gate, self-healing, operator UI, Tailscale | ✅ |
 | v1.1 | [DRAWING_SPEC.md](DRAWING_SPEC.md) | EN ISO 2D drawings, round-trip benchmark, sketch / DXF / STEP intake | ✅ |
-| v1.5 | [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md) | CAM-ready packages: tool library DFM, XCAF colours, stock + setup sheet, QR shopfloor view, batch intake, telemetry | ⏳ after v1.1 |
+| v1.5 | [SPEC_V1_5_CAM_SHOPFLOOR.md](SPEC_V1_5_CAM_SHOPFLOOR.md) | CAM-ready packages: tool library DFM, XCAF colours, stock + setup sheet, QR shopfloor view, batch intake, telemetry | ✅ |
 | v2.5 | – | self-learning loop on the operator-correction telemetry captured from v1.5 | ⏳ |
 
 Versions are built in order: v1.1 is finished (all phases) before v1.5 starts, because v1.5 lists v1.1 as its
@@ -45,11 +45,13 @@ repository that file is `DRAWING_SPEC.md`.
 
 ## v1.5 — CAM-ready output & shopfloor (SPEC_V1_5_CAM_SHOPFLOOR.md §6)
 
-Starts after v1.1. Streams as defined in the spec:
-
 | Stream | Scope | Status |
 |---|---|---|
-| A | `tooling.py` schemas, `tool_library.py` (tools.json + Fusion 360 / CSV import), material groups, DFM v2 tool checks + `recommended_tools`, `stock_catalog.py` raw-blank solver, `/api/config/tools` + `/api/config/stock` | ⏳ untested WIP parked on branch `feat/v1.5-cam-shopfloor` |
-| B | `step_xcaf_exporter.py` with `cam_colors.json` (threads, fits, counterbore/countersink seats, datum face), STEP re-read test, identical colours in `preview.glb` | ⏳ (threads + fits are coloured since v1.0) |
-| C | `qr_helper.py` (vector QR → `PUBLIC_TAILSCALE_URL/shopfloor/<job>`), QR in the drawing title block, 1-page A4 `setup_sheet.pdf`, `spec_corrections` telemetry + `GET /api/metrics/accuracy` | ⏳ |
-| D | `pdf_splitter.py` + `/api/batches` (bounded concurrency, ZIP export), `/shopfloor/:jobId` read-only tablet view with clipping + colour legend, batch dashboard, tool library page | ⏳ |
+| A | `tooling.py` schemas, `tool_library.py` (tools.json + Fusion 360 .json/.tools / CSV import, merge by T-number), material groups, DFM v2 tool checks (pocket corners + reach, drills / taps / thread mills / reamers with pre-drill, bores, slots, seats, chamfers, fillets, face + contour) with `recommended_tools`, `stock_catalog.py` raw-blank solver (smallest standard flat bar, plate fallback, custom block; masses + chip %), `/api/config/tools` + `/api/config/stock`, UI page `/tools` | ✅ `test_tool_dfm.py`, `test_stock_setup.py` |
+| B | `step_xcaf_exporter.py`: one watertight solid with `XCAFDoc_ColorSurf` face colours via `STEPCAFControl_Writer` (AP214, sRGB) from `data/config/cam_colors.json` (thread, tight fit IT ≤ 7 / band ≤ 0.04 mm, counterbore + countersink seats, fine finish Ra ≤ 1.6, datum face); the same colours as vertex colours in `preview.glb` | ✅ `test_xcaf_colors.py` (STEPCAFControl_Reader round trip) |
+| C | `qr_helper.py` (vector QR → `PUBLIC_TAILSCALE_URL/shopfloor/<job>`, warning text when unset), QR cell in the EN ISO 7200 title block, A4 `setup_sheet.pdf` (iso view + G54 triad, raw stock, tooling table, critical inspection, colour legend; `POST /setup-sheet`), `spec_corrections` telemetry (AI snapshot, diff on `PATCH /spec` and "Markeer gecontroleerd" → `POST /verify`), `GET /api/metrics/accuracy` | ✅ `test_shopfloor_telemetry.py` (QR decoded from the rendered PDFs) |
+| D | `pdf_splitter.py` (title-block zone text, configurable part / sheet regexes, continuation grouping, one batched flash call for scanned pages), `batch_runner.py` + `/api/batches` (202, status, SSE, ZIP) with `MAX_CONCURRENT_JOBS`, read-only `/shopfloor/:jobId` (X/Y/Z section, colour legend filter, tap-to-inspect drawer with tools + issues), `/batches` dashboard | ✅ `test_pdf_splitter.py` (synthetic 6-page / 3-part PDF → 3 jobs + ZIP) |
+
+Open with the workshop: run a real multi-part RFQ PDF and a scanned batch through `/batches` (the scanned-page
+fallback is only exercised offline), import the real Fusion 360 tool library, and check the coloured STEP in the CAM
+system (face colours → machining strategies).

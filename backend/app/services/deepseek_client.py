@@ -178,6 +178,7 @@ class LLMClient(Protocol):
     async def generate_complex_code(self, spec: PartSpec, feature: Complex3D, previous_code: str | None,
                                     error_log: str | None, trace: LLMTrace) -> str: ...
 
+    async def identify_title_blocks(self, images: list[ExtractionImage], trace: LLMTrace) -> list[dict]: ...
     async def ping(self) -> dict[str, Any]: ...
 
     async def release_files(self, job_dir: Path) -> int: ...
@@ -609,6 +610,25 @@ class DeepSeekClient:
 
         return await self._json(self.s.deepseek_code_model, build, "complex_code", trace, validate)
 
+    async def identify_title_blocks(self, images: list[ExtractionImage], trace: LLMTrace) -> list[dict]:
+        """v1.5 §2.5 scanned-batch fallback: ONE flash call over low-res title-block crops; labels are page_<i>."""
+        system = ("You read title blocks of scanned technical drawings. For every image (label page_<index>) return "
+                  "the part / drawing number and the sheet number. Output json only: {\"pages\": [{\"page_index\": int, "
+                  "\"part_number\": str|null, \"sheet_index\": int|null, \"is_continuation\": bool}]}. "
+                  "is_continuation = this page is a further sheet of the previous page's part. Never guess numbers.")
+
+        async def build():
+            return [{"role": "system", "content": system},
+                    {"role": "user", "content": [{"type": "text", "text": "Title blocks:"}, *await self._image_parts(images)]}]
+
+        def validate(obj):
+            pages = obj.get("pages") if isinstance(obj, dict) else obj
+            if not isinstance(pages, list):
+                raise ValueError("expected {\"pages\": [...]}")
+            return [p for p in pages if isinstance(p, dict) and "page_index" in p]
+
+        return await self._json(self.s.deepseek_vision_model, build, "title_blocks", trace, validate, thinking="disabled")
+
     async def ping(self) -> dict[str, Any]:
         try:
             ids = [m.id for m in (await self.client.models.list()).data]
@@ -682,6 +702,10 @@ class MockDeepSeekClient:
         return ("from build123d import *\n"
                 f"result = Pos({lo[0]}, {lo[1]}, {lo[2]}) * Box({size[0]}, {size[1]}, {size[2]}, "
                 "align=(Align.MIN, Align.MIN, Align.MIN))\n")
+
+    async def identify_title_blocks(self, images, trace) -> list[dict]:
+        self.calls.append("title_blocks")
+        return []  # offline: scanned pages stay ungrouped (one part per page run)
 
     async def ping(self) -> dict[str, Any]:
         return {"reachable": False, "mock": True}
