@@ -33,9 +33,11 @@ from app.schemas.part_spec import (
     Complex3D,
     MissingDimension,
     PartSpec,
+    SCHEMA_VERSION,
     Stock,
     parse_metric_thread,
     partspec_json_schema,
+    to_v2_coordinates,
 )
 
 log = logging.getLogger(__name__)
@@ -49,14 +51,25 @@ PARTSPEC CONVENTIONS (mandatory):
 - stock = the raw block envelope: length_x (X), width_y (Y), thickness_z (Z).
 - outer_profile: "rectangle", "rounded_rectangle" (corner_radius = the 4 vertical outer corners) or "polygon"
   (points_2d in datum X/Y, corner_radius applied to every vertex).
-- Every feature sits on one face: top|bottom|front|back|left|right. center_x/center_y (and start_/end_/x_min..)
-  are DATUM coordinates projected on that face, never mirrored:
-    top/bottom -> (x, y) = (X, Y)
-    front/back -> (x, y) = (X, Z)   front = the Y-min face, Z is negative below the top face
-    left/right -> (x, y) = (Y, Z)   left  = the X-min face
+- schema_version "2.0". Every feature sits on one face: top|bottom|front|back|left|right, or "plane:<id>" of a
+  tilted plane. center_x/center_y (and start_/end_/x_min..) are LOCAL coordinates on that face, as seen when
+  looking AT the face from outside the part (right-handed, always positive on the face):
+    face    local origin (datum coords)   local +x   local +y   (looking at the face)
+    top     (0, 0, 0) = datum             +X         +Y
+    bottom  (0, W, -T)                    +X         -Y         (part flipped about X)
+    front   (0, 0, -T)  Y-min face        +X         +Z         (height from the bottom edge)
+    back    (L, W, -T)  Y-max face        -X         +Z
+    left    (0, W, -T)  X-min face        -Y         +Z
+    right   (L, 0, -T)  X-max face        +Y         +Z
   Example: an M6 tapped hole in the front face, 30 mm from the left end, at mid-height of a 12 mm plate ->
-  face "front", center_x 30, center_y -6.
-  Convert every baseline / chain / ordinate dimension into these absolute coordinates.
+  face "front", center_x 30, center_y 6.
+  Convert every baseline / chain / ordinate dimension into these local coordinates.
+- tilted_planes (3+2 machining of inclined faces): {id, name, origin_x/y/z (datum coords of the plane's local
+  origin), rot_a_deg, rot_b_deg, rot_c_deg, rotation_convention "SPATIAL_XYZ" (rotate about X, then the new Y,
+  then the new Z: like PLANE SPATIAL / G68.2)}. Local +Z = outward normal of the inclined face; features on it use
+  face "plane:<id>" with local x/y and cut along -Z. An inclined exterior face itself = feature
+  {type "angled_face_cut", face "plane:<id>"} (removes all stock on the outer side of the plane).
+- part_number / revision from the title block when present (revision letter or number).
 - Cuts: depth = blind depth from the face (excluding drill point); through_all = true for THRU (depth null).
 - Holes: diameter = NOMINAL size. Threads: thread "M8" (or "M8x1"), diameter 8, thread_depth = usable thread
   length, depth = drill depth. Counterbore {diameter, depth}; countersink {diameter, angle_deg}.
@@ -87,7 +100,7 @@ PARTSPEC CONVENTIONS (mandatory):
 """
 
 EXAMPLE_SPEC = {
-    "schema_version": "1.0", "part_name": "Montageplaat_A12", "units": "mm", "material": "AlMgSi1 (6082-T6)",
+    "schema_version": "2.0", "part_number": "A12-100", "revision": "A", "part_name": "Montageplaat_A12", "units": "mm", "material": "AlMgSi1 (6082-T6)",
     "general_tolerance": "ISO 2768-mK", "datum_origin": "bottom_left_top_face",
     "stock": {"length_x": 200.0, "width_y": 100.0, "thickness_z": 20.0, "confidence": 0.98},
     "outer_profile": {"type": "rounded_rectangle", "corner_radius": 5.0, "points_2d": None, "confidence": 0.95},
@@ -99,7 +112,7 @@ EXAMPLE_SPEC = {
          "depth": None, "through_all": True, "thread": "M8", "counterbore": None, "tolerance": None,
          "pattern": {"type": "linear", "count_x": 2, "count_y": 2, "pitch_x": 170.0, "pitch_y": 70.0},
          "confidence": 0.78, "source_note": "4x M8 callout slightly blurred"},
-        {"id": "feat_hole_2", "type": "hole", "face": "front", "center_x": 100.0, "center_y": -10.0,
+        {"id": "feat_hole_2", "type": "hole", "face": "front", "center_x": 100.0, "center_y": 10.0,
          "diameter": 6.6, "depth": 25.0, "through_all": False, "counterbore": {"diameter": 11.0, "depth": 6.8},
          "confidence": 0.9, "source_note": "Front view, Ø6.6 / Ø11x6.8"},
     ],
@@ -223,6 +236,13 @@ def _strip_nulls(obj: Any) -> Any:
     if isinstance(obj, list):
         return [_strip_nulls(v) for v in obj]
     return obj
+
+
+def llm_spec(obj) -> PartSpec:
+    """Validate a model answer: the prompt teaches the v2.0 face frames, so the answer is always schema 2.0."""
+    if isinstance(obj, dict):
+        obj = {**obj, "schema_version": SCHEMA_VERSION}
+    return PartSpec.model_validate(obj)
 
 
 def post_process(spec: PartSpec) -> PartSpec:
@@ -458,13 +478,13 @@ class DeepSeekClient:
             content += await self._image_parts(images)
             if previous is not None:
                 content.append({"type": "text", "text": "Previous PartSpec (may contain operator corrections; keep "
-                                                        "what is right):\n" + previous.model_dump_json(exclude_none=True)})
+                                                        "what is right):\n" + to_v2_coordinates(previous).model_dump_json(exclude_none=True)})
             if hint:
                 content.append({"type": "text", "text": f"OPERATOR HINT (authoritative, may be Dutch): {hint}"})
             content.append({"type": "text", "text": "Return the PartSpec json now."})
             return [{"role": "system", "content": system}, {"role": "user", "content": content}]
 
-        spec = await self._json(self.s.deepseek_vision_model, build, "extract", trace, PartSpec.model_validate,
+        spec = await self._json(self.s.deepseek_vision_model, build, "extract", trace, llm_spec,
                                 thinking=self.s.deepseek_thinking)
         return post_process(spec)
 
@@ -508,13 +528,14 @@ class DeepSeekClient:
             content.append({"type": "text", "text": "Return the PartSpec json now."})
             return [{"role": "system", "content": system}, {"role": "user", "content": content}]
 
-        spec = await self._json(self.s.deepseek_vision_model, build, "extract_sketch", trace, PartSpec.model_validate,
+        spec = await self._json(self.s.deepseek_vision_model, build, "extract_sketch", trace, llm_spec,
                                 thinking=self.s.deepseek_thinking)
         return post_process(spec)
 
     async def correct_spec(self, spec: PartSpec, problems: list[str], text_digest: str,
                            images: list[ExtractionImage], trace: LLMTrace) -> PartSpec:
         """Stage 5 -> Stage 2: fix the PartSpec from kernel errors / critic discrepancies, with the drawing."""
+        spec = to_v2_coordinates(spec)  # the prompt teaches the v2.0 frames
         system = ("You correct PartSpec JSON documents. You get the drawing (text layer + images), the current "
                   "PartSpec and a list of problems: CAD kernel errors, verifier failures or visual discrepancies "
                   "reported by a reviewer who compared renders of the model with the drawing.\n"
@@ -533,13 +554,14 @@ class DeepSeekClient:
             content.append({"type": "text", "text": "Return the complete corrected PartSpec json."})
             return [{"role": "system", "content": system}, {"role": "user", "content": content}]
 
-        out = await self._json(self.s.deepseek_vision_model, build, "correct", trace, PartSpec.model_validate,
+        out = await self._json(self.s.deepseek_vision_model, build, "correct", trace, llm_spec,
                                thinking=self.s.deepseek_thinking)
         return post_process(out)
 
     # -- Stage 5: visual critic -----------------------------------------------
     async def critique(self, spec: PartSpec, drawing: list[ExtractionImage], ortho_check: Path, text_digest: str,
                        trace: LLMTrace, hints: list[str] | None = None) -> CriticReport:
+        spec = to_v2_coordinates(spec)
         system = (
             "You are a meticulous CAD/CAM checker. Image set A is the ORIGINAL 2D drawing. The last image is "
             "ortho_check.png: hidden-line FRONT, RIGHT, TOP and ISO views (hidden edges dashed, one common scale) of "

@@ -157,9 +157,16 @@ def _global(frames, face: str, fx: float, fy: float, depth: float = 0.0) -> tupl
     return (p.X, p.Y, p.Z)
 
 
-def _in_view(face: str, fx: float, fy: float) -> tuple[float, float]:
-    """Face coordinates -> coordinates in the view that looks at that face."""
-    return (-fx, fy) if face in ("left", "right") else (fx, fy)
+def _face_view(frames, face: str) -> str:
+    """Orthographic view that looks at a face: the dominant axis of its outward normal (tilted planes too)."""
+    n = frames[face].normal
+    ax = max(range(3), key=lambda i: abs((n.X, n.Y, n.Z)[i]))
+    return ("left", "front", "top")[ax]
+
+
+def _in_view(frames, face: str, fx: float, fy: float) -> tuple[float, float]:
+    """Face coordinates -> coordinates in the view that looks at that face (any frame convention)."""
+    return model_to_view(_face_view(frames, face), _global(frames, face, fx, fy))
 
 
 def _thread_label(h: Hole) -> str:
@@ -239,7 +246,7 @@ def plan_dimensions(spec: PartSpec, font: DrawingFont, dec: str) -> tuple[list[D
     for f in spec.features:
         if isinstance(f, Complex3D):
             continue
-        view = FACE_VIEW[f.face]
+        view = _face_view(frames, f.face)
         pts: list[tuple[float, float]] = []
         radius = 0.0
         if isinstance(f, (Hole, PocketRect, PocketCircle, BossRect, BossCircle)):
@@ -262,18 +269,18 @@ def plan_dimensions(spec: PartSpec, font: DrawingFont, dec: str) -> tuple[list[D
                    if u0 + 1e-6 < x < u1 - 1e-6 or v0 + 1e-6 < y < v1 - 1e-6]
             pts = [(min(max(x, u0), u1), min(max(y, v0), v1)) for x, y in pts]
         for fx, fy in pts:
-            u, v = _in_view(f.face, fx, fy)
+            u, v = _in_view(frames, f.face, fx, fy)
             add(view, "h", u)
             add(view, "v", v)
         lines = callout_lines(f, font, dec)
         if lines and pts:
-            anchor = _in_view(f.face, *pts[0]) if not isinstance(f, PocketPolygon) else _in_view(
-                f.face, sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
-            alts = [_in_view(f.face, *p) for p in pts[1:]] if not isinstance(f, PocketPolygon) else []
+            anchor = _in_view(frames, f.face, *pts[0]) if not isinstance(f, PocketPolygon) else _in_view(
+                frames, f.face, sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+            alts = [_in_view(frames, f.face, *p) for p in pts[1:]] if not isinstance(f, PocketPolygon) else []
             if isinstance(f, (PocketRect, BossRect)) and not f.rotation_deg:
-                sgn = -1 if f.face in ("left", "right") else 1
-                anchor = (anchor[0] + f.length_x / 2 * sgn, anchor[1])
-                alts = [(a[0] + f.length_x / 2 * sgn, a[1]) for a in alts]
+                hx = f.length_x / 2  # leader to the +u edge of the rectangle (mapped into the view)
+                anchor = _in_view(frames, f.face, pts[0][0] + hx, pts[0][1])
+                alts = [_in_view(frames, f.face, x + hx, y) for x, y in pts[1:]]
                 radius = 0.0
             callouts.append(Callout(view, anchor, radius, lines, f.id, alts))
         # depth reference dims in the front view (spec §4.3): pockets, slots, steps, blind holes, counterbores
@@ -907,11 +914,15 @@ HATCH_SPACING = 2.5  # mm on the sheet (EN ISO 128-50: thin lines at 45°, spaci
 
 def _section_plane(spec: PartSpec) -> float | None:
     """Y of the section plane through the row with the most internal (top/bottom) features; None if pointless."""
+    from app.schemas.frames import frames as pure_frames
+
     (x0, y0, z0), (x1, y1, z1) = spec.stock_bbox()
-    spans: list[tuple[float, float, float]] = []  # (y_lo, y_hi, weight)
+    frs = pure_frames(spec)
+    spans: list[tuple[float, float, float]] = []  # (y_lo, y_hi, weight) in global Y
     for f in spec.features:
         if f.face not in ("top", "bottom"):
             continue
+        fr, n0 = frs[f.face], len(spans)
         internal = not getattr(f, "through_all", False) or (isinstance(f, Hole) and (f.counterbore or f.countersink))
         w = 2.0 if internal else 1.0
         if isinstance(f, Hole):
@@ -930,6 +941,10 @@ def _section_plane(spec: PartSpec) -> float | None:
         elif isinstance(f, PocketPolygon):
             ys = [p[1] for p in f.points_2d]
             spans.append((min(ys), max(ys), w))
+        for i in range(n0, len(spans)):  # local v -> global Y (v2.0 bottom: v runs along -Y)
+            a, b, w_ = spans[i]
+            ga, gb = float(fr.point(0.0, a)[1]), float(fr.point(0.0, b)[1])
+            spans[i] = (min(ga, gb), max(ga, gb), w_)
     if not any(w > 1.0 for *_, w in spans):
         return None  # nothing hidden inside: the outside views tell it all
     cands = {round((a + b) / 2, 4) for a, b, _ in spans} | {round((y0 + y1) / 2, 4)}

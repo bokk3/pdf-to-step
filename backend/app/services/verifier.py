@@ -177,14 +177,16 @@ def drawing_callout_texts(job_dir: Path) -> list[str]:
 # 8.1 / 8.2 geometry gate
 # --------------------------------------------------------------------------- #
 
-_FACE_AXIS = {"top": (2, 1), "bottom": (2, -1), "back": (1, 1), "front": (1, -1), "right": (0, 1), "left": (0, -1)}
-
-
 def expected_bbox(spec: PartSpec) -> tuple[np.ndarray, np.ndarray]:
+    from app.schemas.frames import frames
+
     lo, hi = (np.array(v, dtype=float) for v in spec.stock_bbox())
+    frs = frames(spec)
     for f in spec.features:
-        if isinstance(f, (BossRect, BossCircle)):
-            axis, sign = _FACE_AXIS[f.face]
+        if isinstance(f, (BossRect, BossCircle)) and not frs[f.face].tilted:
+            n = frs[f.face].n
+            axis = int(np.argmax(np.abs(n)))
+            sign = 1 if n[axis] > 0 else -1
             if sign > 0:
                 hi[axis] = max(hi[axis], spec.stock_bbox()[1][axis] + f.height)
             else:
@@ -263,12 +265,11 @@ class _Footprint:
 
 
 def _face_extent(spec: PartSpec, face: str) -> tuple[tuple[float, float], tuple[float, float], float]:
-    (x0, y0, z0), (x1, y1, z1) = spec.stock_bbox()
-    if face in ("top", "bottom"):
-        return (x0, x1), (y0, y1), z1 - z0
-    if face in ("front", "back"):
-        return (x0, x1), (z0, z1), y1 - y0
-    return (y0, y1), (z0, z1), x1 - x0
+    """Face extent in local coordinates + material thickness behind it (app.schemas.frames; v1 or v2.0)."""
+    from app.schemas.frames import frames
+
+    fr = frames(spec)[face]
+    return fr.u_range, fr.v_range, fr.thickness
 
 
 def _wall(fp: _Footprint, spec: PartSpec) -> float:
@@ -393,6 +394,8 @@ def dfm_rules(spec: PartSpec, s: Settings) -> list[DFMIssue]:
 
     # 8.5 wall thickness to the stock edge (open cuts that break out on purpose are skipped)
     for fp in fps:
+        if fp.face.startswith("plane:"):
+            continue  # tilted planes have no bounded face extent: covered by the cross-face check (DFM v3)
         wall = _wall(fp, spec)
         if wall < -1e-6:
             if fp.kind == "circle":
@@ -444,8 +447,16 @@ def build_report(spec: PartSpec, version: int, shape, statuses: list[FeatureBuil
             issues.insert(0, DFMIssue(code="FEATURE_FAILED", severity=Severity.error, feature_id=st.feature_id,
                                       message=f"Feature kon niet gebouwd worden: {st.error}"))
     stats = {"volume_mm3": geo.volume_mm3, "feature_count": float(len(spec.features))}
+    try:
+        issues += cross_face_checks(spec, s)
+    except Exception as exc:  # noqa: BLE001 - a kernel hiccup in the check never blocks the build
+        issues.append(DFMIssue(code="CROSS_FACE_CHECK_FAILED", severity=Severity.info,
+                               message=f"Controle tussen vlakken mislukt: {type(exc).__name__}: {exc}"))
     shop = shopfloor_checks(spec, s, geo)
     issues += shop.get("issues", [])
+    from app.services.setup_planner import deck_off_from_stock, plan_setups
+
+    setup_plan = plan_setups(spec, deck_off_from_stock(spec, shop.get("stock")))
     mass = estimate_mass_g(spec, geo.volume_mm3)
     rec = shop.get("stock")
     if mass is None and rec is not None and rec.part_mass_kg is not None:
@@ -465,7 +476,94 @@ def build_report(spec: PartSpec, version: int, shape, statuses: list[FeatureBuil
         tool_checks=shop.get("checks", []),
         recommended_tools=shop.get("assign", []),
         stock_recommendation=rec,
+        setup_plan=setup_plan,
     )
+
+
+def _tool_volumes(spec: PartSpec) -> dict[str, tuple[object, list]]:
+    """Cutter volume of every subtractive feature, clipped to the stock (feature -> (feature, solids))."""
+    from app.services.cad_compiler import CUT_BUILDERS, build_stock, face_frames
+    from app.schemas.part_spec import CUT_TYPES
+
+    frames = face_frames(spec)
+    stock = build_stock(spec)
+    out: dict[str, tuple[object, list]] = {}
+    for f in spec.features:
+        if not isinstance(f, CUT_TYPES):
+            continue
+        solids = []
+        for t in CUT_BUILDERS[type(f)](f, frames[f.face], stock):
+            solids += [x for x in _solids(t.intersect(stock)) if x.volume > 1e-6]
+        if solids:
+            out[f.id] = (f, solids)
+    return out
+
+
+def _solids(r) -> list:
+    """build123d boolean results are a Shape or a ShapeList: always a flat list of solids."""
+    if r is None:
+        return []
+    items = r if isinstance(r, list) else [r]
+    return [s for it in items for s in it.solids()]
+
+
+def _min_distance(a: list, b: list) -> float:
+    from build123d import Compound
+    from OCP.BRepExtrema import BRepExtrema_DistShapeShape
+
+    ext = BRepExtrema_DistShapeShape(Compound(a).wrapped, Compound(b).wrapped)
+    ext.Perform()
+    return float(ext.Value()) if ext.IsDone() else math.inf
+
+
+def cross_face_checks(spec: PartSpec, s: Settings) -> list[DFMIssue]:
+    """DFM v3 (SPEC_V2_0 §3.1): exact 3D distance between the cutter volumes of features from DIFFERENT faces /
+    planes (OCCT BRepExtrema_DistShapeShape). A remaining web in (0, DFM_MIN_WALL_MM) -> warning; two blind cuts
+    from opposing faces that meet -> error unless one is flagged ``intentional_intersection``."""
+    from app.schemas.frames import frames
+
+    if len({f.face for f in spec.features if not isinstance(f, Complex3D)}) < 2:
+        return []
+    frs = frames(spec)
+    vols = _tool_volumes(spec)
+    ids = list(vols)
+    issues: list[DFMIssue] = []
+    for i, ia in enumerate(ids):
+        fa, sa = vols[ia]
+        for ib in ids[i + 1:]:
+            fb, sb = vols[ib]
+            if fa.face == fb.face:
+                continue
+            dist = _min_distance(sa, sb)
+            if dist > s.dfm_min_wall_mm:
+                continue
+            na, nb = frs[fa.face].n, frs[fb.face].n
+            opposing = float(na @ nb) < -0.999
+            intended = fa.intentional_intersection or fb.intentional_intersection
+            if dist > 1e-4:
+                issues.append(DFMIssue(
+                    code="CROSS_FACE_THIN_WEB", severity=Severity.warning, feature_id=ia,
+                    message=f"Restwand tussen {ia} ({fa.face}) en {ib} ({fb.face}) is {dist:.2f} mm "
+                            f"< {s.dfm_min_wall_mm} mm.",
+                    suggestion="Dunne wand tussen bewerkingen van verschillende kanten: trilt, vervormt of breekt door."))
+                continue
+            from build123d import Compound
+
+            overlap = sum(float(x.volume) for x in _solids(Compound(sa).intersect(Compound(sb))))
+            if overlap <= 1e-3:
+                continue  # touching only
+            blind = not getattr(fa, "through_all", False) and not getattr(fb, "through_all", False)
+            if opposing and blind and not intended:
+                issues.append(DFMIssue(
+                    code="CROSS_FACE_BREAKTHROUGH", severity=Severity.error, feature_id=ia,
+                    message=f"{ia} ({fa.face}) en {ib} ({fb.face}) breken onbedoeld in elkaar door "
+                            f"({overlap:.1f} mm³ overlap).",
+                    suggestion="Controleer de dieptes, of zet intentional_intersection: true als dit de bedoeling is."))
+            elif not intended:
+                issues.append(DFMIssue(
+                    code="CROSS_FACE_INTERSECTION", severity=Severity.info, feature_id=ia,
+                    message=f"{ia} ({fa.face}) snijdt {ib} ({fb.face}) (kruisboring / doorbraak)."))
+    return issues
 
 
 def shopfloor_checks(spec: PartSpec, s: Settings, geo: GeometryCheck | None) -> dict:

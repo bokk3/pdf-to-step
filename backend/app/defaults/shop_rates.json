@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "currency": "EUR",
+  "machines": {
+    "3axis_vmc": {
+      "label": "3-Axis VMC",
+      "hourly_rate": 75.0,
+      "tool_change_sec": 6.0,
+      "load_unload_sec": 45.0
+    },
+    "5axis_3plus2": {
+      "label": "5-Axis (3+2 Indexed)",
+      "hourly_rate": 105.0,
+      "tool_change_sec": 5.0,
+      "load_unload_sec": 45.0
+    }
+  },
+  "setup_minutes": {
+    "base_cam_programming": 20.0,
+    "per_3axis_setup": 15.0,
+    "per_5axis_setup": 20.0,
+    "mill_softjaws_pair": 25.0
+  },
+  "materials": {
+    "aluminum": {
+      "price_per_kg": 9.5,
+      "mrr_cm3_per_min": 45.0,
+      "finish_min_per_100cm2": 1.2,
+      "hole_sec_base": 12.0,
+      "tap_sec": 10.0,
+      "ream_sec": 18.0
+    },
+    "steel": {
+      "price_per_kg": 4.8,
+      "mrr_cm3_per_min": 14.0,
+      "finish_min_per_100cm2": 2.8,
+      "hole_sec_base": 24.0,
+      "tap_sec": 18.0,
+      "ream_sec": 30.0
+    },
+    "stainless": {
+      "price_per_kg": 8.2,
+      "mrr_cm3_per_min": 9.0,
+      "finish_min_per_100cm2": 3.8,
+      "hole_sec_base": 32.0,
+      "tap_sec": 25.0,
+      "ream_sec": 40.0
+    },
+    "plastic": {
+      "price_per_kg": 14.0,
+      "mrr_cm3_per_min": 65.0,
+      "finish_min_per_100cm2": 0.9,
+      "hole_sec_base": 8.0,
+      "tap_sec": 8.0,
+      "ream_sec": 12.0
+    }
+  },
+  "saw_waste_factor": 0.08,
+  "margin_pct_default": 20.0
+}

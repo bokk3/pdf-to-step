@@ -236,8 +236,9 @@ class Inst:
 
 
 def _thickness(spec: PartSpec, face: str) -> float:
-    (x0, y0, z0), (x1, y1, z1) = spec.stock_bbox()
-    return {"top": z1 - z0, "bottom": z1 - z0, "front": y1 - y0, "back": y1 - y0}.get(face, x1 - x0)
+    from app.schemas.frames import frames
+
+    return frames(spec)[face].thickness
 
 
 def _depth(spec: PartSpec, f) -> float:
