@@ -55,7 +55,8 @@ def solve_stock(size_mm: tuple[float, float, float], part_volume_mm3: float | No
             bx, by = _up(req.x, step), _up(req.y, step)
             options.append((bx * by * t, 1, "plate", f"plaat {t:g} mm", Dims(x=bx, y=by, z=t), max(bx, by)))
     if options:
-        vol, _, ptype, label, blank, saw = min(options, key=lambda o: (round(o[0], 3), o[1]))
+        # spec §2.3: the smallest standard flat bar that fits; plate only when no bar does
+        vol, _, ptype, label, blank, saw = min(options, key=lambda o: (o[1], round(o[0], 3)))
         note = ""
     else:
         blank = Dims(x=_up(req.x, step), y=_up(req.y, step), z=math.ceil(req.z))

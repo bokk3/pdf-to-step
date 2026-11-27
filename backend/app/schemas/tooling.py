@@ -26,7 +26,7 @@ class _Model(BaseModel):
 
 
 class ToolSpec(_Model):
-    id: str = Field(min_length=1, max_length=32, description="magazine / pocket number, e.g. 'T04'")
+    id: str = Field("", max_length=32, description="magazine / pocket number, e.g. 'T04' (empty only before merging)")
     name: str = ""
     tool_type: ToolType
     diameter_mm: float = Field(gt=0, description="cutting diameter (nominal thread size for taps / thread mills)")
@@ -61,6 +61,8 @@ class ToolLibrary(_Model):
     def _unique_ids(self) -> "ToolLibrary":
         seen: set[str] = set()
         for t in self.tools:
+            if not t.id:
+                raise ValueError("every tool needs an id (e.g. T04)")
             if t.id in seen:
                 raise ValueError(f"duplicate tool id {t.id!r}")
             seen.add(t.id)

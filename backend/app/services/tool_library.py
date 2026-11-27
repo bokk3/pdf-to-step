@@ -219,11 +219,23 @@ def _csv_tools(text: str) -> ImportResult:
     sample = text[:4096]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
-    except csv.Error:
-        dialect = csv.excel
-    rows = list(csv.DictReader(io.StringIO(text), dialect=dialect))
+    except csv.Error:  # ragged rows: take the delimiter the header line uses most
+        header = text.splitlines()[0] if text.strip() else ""
+        delim = max(";,\t", key=header.count)
+
+        class _Dialect(csv.excel):
+            delimiter = delim
+
+        dialect = _Dialect
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect, restkey="_rest")
+    rows = list(reader)
+    last = (reader.fieldnames or [""])[-1]
     for n, row in enumerate(rows, start=2):
-        norm = {str(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+        rest = row.pop("_rest", None)  # unquoted delimiters inside the last cell (e.g. "aluminium;POM")
+        if rest:
+            row[last] = ";".join([row.get(last) or "", *rest])
+        norm = {str(k or "").strip().lower(): (v if isinstance(v, str) else ";".join(v or [])).strip()
+                for k, v in row.items()}
         get = lambda key: next((norm[a] for a in CSV_ALIASES[key] if norm.get(a)), "")  # noqa: E731
         ttype = _tool_type(get("tool_type") or get("name")) or "other"
         d, lcf = _num(get("diameter_mm")), _num(get("flute_length_mm"))
@@ -586,7 +598,7 @@ class _Checker:
             if et.type == "chamfer":
                 tools = [t for t in self.of(CHAMFER_TOOLS) if t.diameter_mm >= 2 * et.size + 1]
                 if tools:
-                    t = min(tools, key=lambda t: t.diameter_mm)
+                    t = min(tools, key=lambda t: (t.tool_type != "chamfer_mill", t.diameter_mm))
                     self.ok(et.id, "chamfer", t, f"Afschuining {_fmt(et.size)}x45° met {t.label()}.")
                 else:
                     self.warn(et.id, "chamfer", f"Afschuining {_fmt(et.size)}x45°: geen afschuinfrees ≥ "
