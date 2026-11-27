@@ -25,6 +25,7 @@ exact analytic geometry; a verifier gates the result on geometry and manufactura
      ──► + EN ISO detail drawing of every revision (PDF / SVG / DXF), generated from the PartSpec and the B-Rep
      ──► + CAM package: colour-coded STEP, tool-library DFM, raw-stock advice, A4 setup sheet, QR → shopfloor view
 
+ v2  ──► 6 faces + tilted 3+2 planes, setup plan (3-axis vs 5-axis), Op 2 softjaws, Rev A vs Rev B diff, quote
  RFQ ──► multi-page customer PDF → split per part number / sheet → one job per part (throttled) → ZIP of STEPs
 
  DXF ──► layered DXF (CONTOUR_T20, POCKET_D8, HOLE_THRU, THREAD_M6_D12, SLOT_D6) → PartSpec, zero AI → 3 …
@@ -48,6 +49,15 @@ STEP ──► your own B-Rep, moved to the datum, features recognised for DFM +
   section planes, colour filter, tap a face for tolerance, roughness and tools.
 - **Batch intake** (`/batches`): one customer RFQ PDF with many drawings becomes one job per part, at most
   `MAX_CONCURRENT_JOBS` at once, with a live table and a ZIP of all ready STEPs, drawings and setup sheets.
+- **Multi-sided & 3+2** (PartSpec 2.0): features on all six faces and on tilted working planes (SPATIAL_XYZ,
+  like PLANE SPATIAL / G68.2), angled face cuts, a setup plan per machine type (3-axis vs 5-axis 3+2) and a
+  cross-face check for thin webs and unintended breakthroughs. Stored v1 jobs load and compile unchanged.
+- **Softjaws**: one click turns the finished part into two ready-to-mill Op 2 jaws (STEP with named bodies and
+  green pocket faces) for a vise from `vises.json`: undercut-safe cavity, dogbones, bolt-clearance safety checks.
+- **Revision diff**: Rev A vs Rev B of the same drawing number as exact B-Rep booleans (green added, red removed)
+  plus a classified feature diff (`BREAKING_CAM`, `GEOMETRY_CHANGE`, `METADATA_ONLY`) and a 1-page PDF.
+- **Quoting**: deterministic cycle time and cost with quantity price breaks, 3-axis vs 5-axis, every euro traced to
+  a volume, area, hole, setup and rate (`/settings/rates`); PDF / CSV export.
 - **Correction telemetry**: every operator edit and "Markeer gecontroleerd" is diffed against the AI reading
   (`GET /api/metrics/accuracy`), the raw data for the planned self-learning loop.
 - **EN ISO 2D drawings**: first-angle views + isometric, baseline dimensions from the datum, ISO callouts,
@@ -132,6 +142,11 @@ All settings live in `.env` (see [.env.example](.env.example)). The most importa
 | `GET` | `/api/jobs/{id}/shopfloor` | read-only payload for the tablet view (features, colours, tools, artifacts) |
 | `POST` | `/api/batches` | multi-page PDF → `202 {batch_id, job_count}`; `GET /api/batches/{id}` · `/events` (SSE) · `/download-zip` |
 | `GET` · `PUT` | `/api/config/tools` · `/api/config/stock` | tool library · raw stock catalogue; `POST /api/config/tools/import-fusion` |
+| `GET` | `/api/jobs/{id}/setup-plan` | 3-axis vs 5-axis 3+2 setups, clamping advice |
+| `POST` | `/api/jobs/{id}/softjaws` | Op 2 softjaws (`softjaws.step`, `softjaws_assembly.glb`, report); `GET`·`PUT /api/config/vises` |
+| `GET` | `/api/parts/{part_number}/revisions` | all jobs of a drawing number, oldest first |
+| `POST` | `/api/revisions/diff` | `{job_old_id, job_new_id}` -> B-Rep + semantic diff, GLB and PDF URLs |
+| `POST` | `/api/jobs/{id}/quote` | price breaks; `GET /api/jobs/{id}/quote/export.pdf` · `.csv`; `GET`·`PUT /api/config/shop-rates` |
 | `GET` | `/api/metrics/accuracy` | verified jobs, untouched-pass rate, corrections per feature type |
 | `GET` | `/api/health?deep=true` | OCCT + DeepSeek connectivity |
 
@@ -152,7 +167,7 @@ upload the STEP itself.
 ## Tests
 
 ```bash
-cd backend && .venv/bin/python -m pytest        # ~150 tests, offline (DeepSeek mocked), ~6 min
+cd backend && .venv/bin/python -m pytest        # ~180 tests, offline (DeepSeek mocked), ~8 min
 python tests/fixtures/make_fixtures.py         # regenerate the sample drawing + expected specs
 
 # round-trip extraction benchmark (DRAWING_SPEC phase 2): synthetic ISO drawings + fixtures -> pipeline -> diff
@@ -188,6 +203,9 @@ backend/app/
   services/setup_sheet.py / qr_helper.py  A4 setup sheet, vector QR codes
   services/pdf_splitter.py / batch_runner.py  multi-page RFQ split + throttled batch runs
   services/telemetry.py     operator-correction diffs + accuracy metrics
+  schemas/frames.py         face / tilted-plane frames (v2.0 and v1 conventions), pure numpy
+  services/setup_planner.py / softjaw_generator.py  setup plan, Op 2 softjaws
+  services/revision_diff.py / quoting_engine.py      Rev A vs B booleans + semantic diff, deterministic quotes
   services/pipeline.py      orchestrator (process pool, self-healing loop, PATCH rebuilds, intake flows)
   api/                      REST + SSE endpoints
 backend/tests/              pytest suite + fixtures
@@ -206,8 +224,9 @@ scripts/                    service.ps1, start_tailscale.{sh,ps1}, dev.{sh,ps1}
 ## Status
 
 Working end to end on 2.5D prismatic milling parts: PDF, DXF, STEP and paper-sketch intake, EN ISO 2D drawings and a
-round-trip extraction benchmark, a live 2D preview in the spec editor, and the v1.5 CAM / shopfloor package (coloured
-STEP, tool-library DFM, stock advice, setup sheets, QR tablet view, batch intake, correction telemetry). Next (see
-[ROADMAP.md](ROADMAP.md)): v2.5, the learning loop on the correction telemetry.
+round-trip extraction benchmark, a live 2D preview in the spec editor, the v1.5 CAM / shopfloor package (coloured
+STEP, tool-library DFM, stock advice, setup sheets, QR tablet view, batch intake, correction telemetry) and v2.0
+(multi-sided and 3+2 parts, setup plans, softjaws, revision diff, quoting). Next (see [ROADMAP.md](ROADMAP.md)):
+v2.5, the learning loop on the correction telemetry.
 
 No license has been chosen yet; until then all rights are reserved by the author.

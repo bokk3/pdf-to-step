@@ -740,6 +740,7 @@ class Pipeline:
 
     async def _finish(self, job_id: str, version: int, result: dict[str, Any], critic) -> str:
         await self._snapshot_if_ai(job_id, version)
+        await self._record_lineage(job_id, version)
         jd = self.job_dir(job_id)
         vdir = jd / "versions" / f"v{version}"
         if "fatal" in result or "model.step" not in result.get("files", {}):
@@ -784,6 +785,21 @@ class Pipeline:
             "drawing": result.get("drawing"),
         }
 
+    async def _record_lineage(self, job_id: str, version: int) -> None:
+        """v2.0 §3.3: index the job by normalized part_number + revision (from the PartSpec / title block)."""
+        from app.services.revision_diff import norm_part_number, norm_revision
+
+        try:
+            spec = self.load_spec(job_id, version)
+        except Exception:  # noqa: BLE001
+            return
+        fields: dict[str, Any] = {}
+        if spec.part_number:
+            fields["part_number"] = norm_part_number(spec.part_number)
+        if spec.revision:
+            fields["revision"] = norm_revision(spec.revision)
+        if fields:
+            await self.store.update_job(job_id, **fields)
     async def _snapshot_if_ai(self, job_id: str, version: int) -> None:
         """v1.5 §2.6: the latest AI-sourced revision is the baseline the operator's corrections are measured against."""
         from app.services import telemetry
@@ -795,6 +811,7 @@ class Pipeline:
     async def _await_dimensions(self, job_id: str, version: int, spec: PartSpec) -> None:
         """DRAWING_SPEC §5: blocking missing dimensions pause the job before any CAD / drawing work."""
         await self._snapshot_if_ai(job_id, version)
+        await self._record_lineage(job_id, version)
         missing = spec.blocking_missing
         await self.store.update_job(job_id, current_version=version, error=None)
         await self.emit(job_id, "awaiting_dimensions",

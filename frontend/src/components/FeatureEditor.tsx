@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import SpecPreview2D from './SpecPreview2D'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { api, validationLines } from '../api/client'
-import type { DFMReport, EdgeTreatment, Feature, FeatureType, JobDetail, PartSpec, XY } from '../types/partSpec'
+import type { DFMReport, EdgeTreatment, Feature, FeatureType, JobDetail, PartSpec, TiltedPlane, XY } from '../types/partSpec'
 import { DATUMS, EDGE_TARGETS, FACES, REVIEW_CONFIDENCE_THRESHOLD, needsReview } from '../types/partSpec'
 
 // ---- field model ------------------------------------------------------------------
@@ -25,6 +25,7 @@ const FACE: FieldDef = { key: 'face', label: 'vlak', kind: 'enum', options: FACE
 const CENTER: FieldDef = { key: 'center_x', key2: 'center_y', label: 'midden x, y', kind: 'pair' }
 const DEPTH: FieldDef = { key: 'depth', label: 'diepte', kind: 'numOpt', placeholder: 'door', disabled: (f) => !!f.through_all }
 const THRU: FieldDef = { key: 'through_all', label: 'door', kind: 'bool' }
+const CROSS: FieldDef = { key: 'intentional_intersection', label: 'bewust doorbreken', kind: 'bool' }
 const hasPattern = (t: string) => (f: Rec) => (f.pattern as Rec | null | undefined)?.type === t
 
 const PATTERN: FieldDef[] = [
@@ -48,14 +49,14 @@ const FIELDS: Record<FeatureType, FieldDef[]> = {
     { key: 'thread', label: 'draad', kind: 'text', placeholder: 'geen (bv. M8)' },
     { key: 'thread_depth', label: 'draaddiepte', kind: 'numOpt', show: (f) => !!f.thread },
     { key: 'tolerance', label: 'tolerantie', kind: 'text', placeholder: 'geen (bv. H7)' },
-    ...PATTERN,
+    CROSS, ...PATTERN,
   ],
   pocket_rect: [
     FACE, CENTER, { key: 'length_x', label: 'lengte x', kind: 'num' }, { key: 'width_y', label: 'breedte y', kind: 'num' },
     { key: 'corner_radius', label: 'hoek R', kind: 'num' }, { key: 'rotation_deg', label: 'rotatie °', kind: 'num' },
-    DEPTH, THRU, ...PATTERN,
+    DEPTH, THRU, CROSS, ...PATTERN,
   ],
-  pocket_circle: [FACE, CENTER, { key: 'diameter', label: 'Ø', kind: 'num' }, DEPTH, THRU, ...PATTERN],
+  pocket_circle: [FACE, CENTER, { key: 'diameter', label: 'Ø', kind: 'num' }, DEPTH, THRU, CROSS, ...PATTERN],
   pocket_polygon: [
     FACE, { key: 'points_2d', label: 'punten x, y; …', kind: 'points', wide: true },
     { key: 'corner_radius', label: 'hoek R', kind: 'num' }, DEPTH, THRU,
@@ -63,7 +64,7 @@ const FIELDS: Record<FeatureType, FieldDef[]> = {
   slot: [
     FACE, { key: 'start_x', key2: 'start_y', label: 'start x, y', kind: 'pair' },
     { key: 'end_x', key2: 'end_y', label: 'eind x, y', kind: 'pair' },
-    { key: 'width', label: 'breedte', kind: 'num' }, DEPTH, THRU,
+    { key: 'width', label: 'breedte', kind: 'num' }, DEPTH, THRU, CROSS,
   ],
   boss_rect: [
     FACE, CENTER, { key: 'length_x', label: 'lengte x', kind: 'num' }, { key: 'width_y', label: 'breedte y', kind: 'num' },
@@ -76,6 +77,7 @@ const FIELDS: Record<FeatureType, FieldDef[]> = {
     { key: 'y_min', key2: 'y_max', label: 'y van, tot', kind: 'pair' },
     { key: 'depth', label: 'diepte', kind: 'num' }, { key: 'corner_radius', label: 'hoek R', kind: 'num' },
   ],
+  angled_face_cut: [FACE, { key: 'offset', label: 'offset (mm)', kind: 'num' }],
   complex_3d: [
     { key: 'operation', label: 'bewerking', kind: 'enum', options: ['cut', 'union'] },
     { key: 'description', label: 'omschrijving', kind: 'text', wide: true },
@@ -100,22 +102,35 @@ const TEMPLATES: { [K in FeatureType]: Omit<Extract<Feature, { type: K }>, 'id'>
   },
   boss_circle: { type: 'boss_circle', face: 'top', center_x: 30, center_y: 20, diameter: 10, height: 5, confidence: 1 },
   step_cut: { type: 'step_cut', face: 'top', x_min: 0, x_max: 10, y_min: 0, y_max: 50, depth: 5, corner_radius: 0, confidence: 1 },
+  angled_face_cut: { type: 'angled_face_cut', face: 'plane:P1', offset: 0, confidence: 1 },
   complex_3d: { type: 'complex_3d', face: 'top', description: 'beschrijf de niet-prismatische vorm', operation: 'cut', confidence: 1 },
 }
 
 const PREFIX: Record<FeatureType, string> = {
   hole: 'H', pocket_rect: 'P', pocket_circle: 'P', pocket_polygon: 'P', slot: 'S', boss_rect: 'B', boss_circle: 'B',
-  step_cut: 'SC', complex_3d: 'X',
+  step_cut: 'SC', angled_face_cut: 'AF', complex_3d: 'X',
 }
 
 const TYPE_LABEL: Record<FeatureType, string> = {
   hole: 'gat', pocket_rect: 'kamer ▭', pocket_circle: 'kamer ○', pocket_polygon: 'kamer ⬠', slot: 'sleuf',
-  boss_rect: 'nok ▭', boss_circle: 'nok ○', step_cut: 'stap', complex_3d: '3D (AI)',
+  boss_rect: 'nok ▭', boss_circle: 'nok ○', step_cut: 'stap', angled_face_cut: 'schuin vlak', complex_3d: '3D (AI)',
 }
 
 const GRID = 'grid grid-cols-2 gap-x-3 gap-y-2.5 sm:grid-cols-3 md:grid-cols-4 2xl:grid-cols-6'
 
 // ---- helpers ------------------------------------------------------------------------
+
+function newPlane(id: string, spec: PartSpec): TiltedPlane {
+  const { length_x: L, width_y: W } = spec.stock
+  return { id, name: null, origin_x: L, origin_y: W / 2, origin_z: 0, rot_a_deg: 0, rot_b_deg: 30, rot_c_deg: 0,
+    rotation_convention: 'SPATIAL_XYZ', confidence: 1 }
+}
+
+/** Faces a feature can sit on: the six stock faces + every tilted plane (angled_face_cut: planes only). */
+function faceOptions(spec: PartSpec, type: FeatureType): string[] {
+  const planes = (spec.tilted_planes ?? []).map((p) => `plane:${p.id}`)
+  return type === 'angled_face_cut' ? planes : [...FACES, ...planes]
+}
 
 function getPath(obj: Rec, path: string): unknown {
   return path.split('.').reduce<unknown>((o, k) => (o && typeof o === 'object' ? (o as Rec)[k] : undefined), obj)
@@ -220,8 +235,27 @@ export default function FeatureEditor({ jobId, spec, version, report, selectedId
 
   function addFeature(type: FeatureType) {
     const f = { ...structuredClone(TEMPLATES[type]), id: nextId(PREFIX[type]) } as Feature
-    setDraft((d) => ({ ...d, features: [...d.features, f], requires_complex_3d_fallback: d.requires_complex_3d_fallback || type === 'complex_3d' }))
+    let planes = draft.tilted_planes ?? []
+    if (type === 'angled_face_cut') {
+      if (!planes.length) planes = [newPlane('P1', draft)]
+      f.face = `plane:${planes[0].id}`
+    }
+    setDraft((d) => ({
+      ...d, schema_version: type === 'angled_face_cut' ? '2.0' : d.schema_version, tilted_planes: planes,
+      features: [...d.features, f], requires_complex_3d_fallback: d.requires_complex_3d_fallback || type === 'complex_3d',
+    }))
     onSelect(f.id)
+  }
+
+  function addPlane() {
+    const used = new Set((draft.tilted_planes ?? []).map((p) => p.id))
+    let n = 1
+    while (used.has(`P${n}`)) n++
+    setDraft((d) => ({ ...d, schema_version: '2.0', tilted_planes: [...(d.tilted_planes ?? []), newPlane(`P${n}`, d)] }))
+  }
+
+  function updPlane(idx: number, key: keyof TiltedPlane, v: unknown) {
+    setDraft((d) => ({ ...d, tilted_planes: (d.tilted_planes ?? []).map((p, i) => (i === idx ? { ...p, [key]: v } : p)) }))
   }
 
   function addEdge() {
@@ -312,6 +346,8 @@ export default function FeatureEditor({ jobId, spec, version, report, selectedId
             <TextField label="onderdeel" value={draft.part_name} wide onChange={(v) => setDraft((d) => ({ ...d, part_name: v || null }))} />
             <TextField label="materiaal" value={draft.material} onChange={(v) => setDraft((d) => ({ ...d, material: v || null }))} />
             <TextField label="alg. tolerantie" value={draft.general_tolerance} onChange={(v) => setDraft((d) => ({ ...d, general_tolerance: v || null }))} />
+            <TextField label="tekeningnr." value={draft.part_number} onChange={(v) => setDraft((d) => ({ ...d, part_number: v || null }))} />
+            <TextField label="revisie" value={draft.revision} onChange={(v) => setDraft((d) => ({ ...d, revision: v || null }))} />
             <Field label="nulpunt (mm)" wide>
               <select className="sel-input w-full" value={draft.datum_origin} onChange={(e) => setDraft((d) => ({ ...d, datum_origin: e.target.value as PartSpec['datum_origin'] }))}>
                 {DATUMS.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -359,6 +395,32 @@ export default function FeatureEditor({ jobId, spec, version, report, selectedId
             </div>
           </div>
 
+          {/* v2.0 tilted 3+2 working planes */}
+          {(draft.tilted_planes ?? []).map((p, idx) => (
+            <div key={`tp${idx}`} className={cardCls(`plane:${p.id}`, p.confidence)}>
+              <div className="mb-2.5 flex items-center gap-2">
+                <input className="txt-input w-36 font-semibold sm:w-44" aria-label="vlak-id" value={p.id}
+                  onChange={(e) => updPlane(idx, 'id', e.target.value)} />
+                <span className="shrink-0 rounded bg-violet-900/50 px-1.5 py-0.5 text-[11px] text-violet-200" title="SPATIAL_XYZ: eerst om X, dan Y, dan Z">schuin werkvlak 3+2</span>
+                <span className="ml-auto flex items-center gap-1.5">
+                  <Conf value={p.confidence} onVerify={() => updPlane(idx, 'confidence', 1)} />
+                  <button className="btn btn-danger !px-2" aria-label={`${p.id} verwijderen`}
+                    onClick={() => setDraft((d) => ({ ...d, tilted_planes: (d.tilted_planes ?? []).filter((_, i) => i !== idx) }))}>
+                    <TrashIcon />
+                  </button>
+                </span>
+              </div>
+              <div className={GRID}>
+                {(['origin_x', 'origin_y', 'origin_z', 'rot_a_deg', 'rot_b_deg', 'rot_c_deg'] as const).map((k) => (
+                  <Field key={k} label={{ origin_x: 'oorsprong x', origin_y: 'oorsprong y', origin_z: 'oorsprong z',
+                    rot_a_deg: 'A ° (om X)', rot_b_deg: 'B ° (om Y)', rot_c_deg: 'C ° (om Z)' }[k]}>
+                    <NumberField value={p[k]} optional={false} onChange={(v) => updPlane(idx, k, v)} />
+                  </Field>
+                ))}
+              </div>
+            </div>
+          ))}
+
           {/* features */}
           {draft.features.map((f, idx) => (
             <div key={idx} ref={(el) => { rowRefs.current[f.id] = el }} onClick={() => onSelect(f.id)} className={cardCls(f.id, f.confidence)}>
@@ -377,7 +439,8 @@ export default function FeatureEditor({ jobId, spec, version, report, selectedId
               <div className={GRID}>
                 {FIELDS[f.type]
                   .filter((fd) => !fd.show || fd.show(f as unknown as Rec))
-                  .map((fd) => <FieldInput key={fd.key} def={fd} rec={f as unknown as Rec} onChange={(path, v) => updFeature(idx, path, v)} />)}
+                  .map((fd) => <FieldInput key={fd.key} def={fd.key === 'face' ? { ...fd, options: faceOptions(draft, f.type) } : fd}
+                    rec={f as unknown as Rec} onChange={(path, v) => updFeature(idx, path, v)} />)}
               </div>
               {('extra_positions' in f && (f.extra_positions?.length ?? 0) > 0) || f.type === 'complex_3d' || f.source_note || failed.has(f.id) ? (
                 <div className="mt-2 space-y-0.5 text-xs">
@@ -433,6 +496,7 @@ export default function FeatureEditor({ jobId, spec, version, report, selectedId
                 <button key={t} className="btn" onClick={() => addFeature(t)}>+ {TYPE_LABEL[t]}</button>
               ))}
               <button className="btn" onClick={addEdge}>+ randbewerking</button>
+              <button className="btn" onClick={addPlane} title="3+2: schuin werkvlak (PLANE SPATIAL)">+ schuin werkvlak</button>
             </div>
           </div>
         </div>

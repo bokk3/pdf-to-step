@@ -5,6 +5,8 @@ import DfmWarningsPanel from './DfmWarningsPanel'
 import FeatureEditor from './FeatureEditor'
 import IsoDrawing from './IsoDrawing'
 import VerifyButton from './VerifyButton'
+import SetupPlanPanel from './SetupPlanPanel'
+import V2Actions from './V2Actions'
 import MissingDimensionsModal from './MissingDimensionsModal'
 import StepImportNote from './StepImportNote'
 import JobList from './JobList'
@@ -58,6 +60,7 @@ export default function MobileShell(p: Props) {
   const { job } = p
   const [tab, setTab] = useState<Tab>(readHashTab)
   const [jobsOpen, setJobsOpen] = useState(false)
+  const [softjawsOpen, setSoftjawsOpen] = useState(false)
   const firstJob = useRef(job?.job_id ?? window.location.hash.match(/job=([a-f0-9]+)/)?.[1])
 
   // a different job starts on the status tab (the initial one keeps a deep-linked #…&tab=)
@@ -192,7 +195,11 @@ export default function MobileShell(p: Props) {
                 {art['setup_sheet.pdf'] && <a className="btn" href={art['setup_sheet.pdf']} target="_blank" rel="noreferrer">Instelblad</a>}
                 <a className="btn" href={`/shopfloor/${job.job_id}`}>Werkplaatsweergave</a>
                 <div className="col-span-2 grid"><VerifyButton job={job} running={p.running} onDone={p.onReload} /></div>
+                <V2Actions job={job} running={p.running} softjawsOpen={softjawsOpen} setSoftjawsOpen={setSoftjawsOpen} full />
               </div>
+            )}
+            {job.current_version > 0 && job.status === 'ready' && (
+              <SetupPlanPanel jobId={job.job_id} version={job.version} tick={p.renderTick} onSoftjaws={() => setSoftjawsOpen(true)} />
             )}
 
             <PipelineProgress job={job} events={p.events} live={p.live} iterations={job.iteration_logs} compact />

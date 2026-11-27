@@ -151,6 +151,7 @@ export function NavLinks() {
     <nav className="ml-auto flex gap-1.5">
       {link('/batches', 'Batches')}
       {link('/tools', 'Gereedschap')}
+      {link('/settings', 'Instellingen')}
     </nav>
   )
 }

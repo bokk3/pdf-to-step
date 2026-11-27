@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import batches, drawings, health, jobs, shopfloor, softjaws, tools
+from app.api import batches, drawings, health, jobs, quotes, revisions, shopfloor, softjaws, tools
 from app.config import PROJECT_ROOT, Settings, get_settings
 from app.db import JobStore
 from app.services.deepseek_client import LLMClient, make_client
@@ -61,6 +61,8 @@ def create_app(settings: Settings | None = None, llm: LLMClient | None = None, u
     app.include_router(tools.router)
     app.include_router(shopfloor.router)
     app.include_router(batches.router)
+    app.include_router(revisions.router)
+    app.include_router(quotes.router)
 
     if FRONTEND_DIST.exists():
         app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")

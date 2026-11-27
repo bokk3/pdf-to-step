@@ -17,11 +17,16 @@ interface Props {
   onPick?: (point: THREE.Vector3, hex: string | null) => void
   markers?: [number, number, number][]
   hideOrtho?: boolean
+  /** v2.0 multi-body previews (softjaws, revision diff): keep the GLB's own materials (colour, opacity) */
+  keepMaterials?: boolean
+  /** node / layer names to hide (e.g. 'Unchanged') */
+  hiddenLayers?: string[]
 }
 
 type Tab = '3d' | 'ortho'
 
-export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0, clipPlane, highlight, onPick, markers, hideOrtho }: Props) {
+export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0, clipPlane, highlight, onPick, markers, hideOrtho,
+  keepMaterials, hiddenLayers }: Props) {
   const [tab, setTab] = useState<Tab>('3d')
   const [wireframe, setWireframe] = useState(false)
   const [edges, setEdges] = useState(true)
@@ -69,7 +74,8 @@ export default function Step3DViewer({ glbUrl, orthoUrl, bboxMax, floorZ = 0, cl
                 <OrbitControls makeDefault enableDamping dampingFactor={0.12} />
                 <Suspense fallback={null}>
                   <Model url={glbUrl} wireframe={wireframe} edges={edges} fitTick={fitTick}
-                    clipPlane={clipPlane ?? null} highlight={highlight ?? null} onPick={onPick} />
+                    clipPlane={clipPlane ?? null} highlight={highlight ?? null} onPick={onPick}
+                    keepMaterials={!!keepMaterials} hiddenLayers={hiddenLayers ?? null} />
                   {markers?.map((p, i) => (
                     <mesh key={i} position={p} renderOrder={10}>
                       <sphereGeometry args={[Math.max(size * 0.012, 0.6), 16, 12]} />
@@ -116,11 +122,13 @@ interface ModelProps {
   clipPlane: THREE.Plane | null
   highlight: string[] | null
   onPick?: (point: THREE.Vector3, hex: string | null) => void
+  keepMaterials: boolean
+  hiddenLayers: string[] | null
 }
 
 const DIM = new THREE.Color(0.05, 0.055, 0.065) // linear: faces outside the legend filter
 
-function Model({ url, wireframe, edges, fitTick, clipPlane, highlight, onPick }: ModelProps) {
+function Model({ url, wireframe, edges, fitTick, clipPlane, highlight, onPick, keepMaterials, hiddenLayers }: ModelProps) {
   const { scene } = useGLTF(url)
   const { camera, controls, size, invalidate } = useThree()
   const root = useMemo(() => {
@@ -131,7 +139,11 @@ function Model({ url, wireframe, edges, fitTick, clipPlane, highlight, onPick }:
       if (!mesh.geometry.getAttribute('normal')) mesh.geometry.computeVertexNormals()
       const colors = mesh.geometry.getAttribute('color') as THREE.BufferAttribute | undefined
       if (colors) srgbToLinear(colors) // CAM colours from model.step (v1.5 §2.2), stored as sRGB bytes
-      mesh.material = new THREE.MeshStandardMaterial({
+      const own = mesh.material as THREE.MeshStandardMaterial
+      mesh.material = keepMaterials ? Object.assign(own.clone(), {
+        side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
+        depthWrite: !own.transparent,
+      }) : new THREE.MeshStandardMaterial({
         color: colors ? '#ffffff' : '#b4c2d0',
         vertexColors: !!colors,
         metalness: 0.15,
@@ -146,10 +158,19 @@ function Model({ url, wireframe, edges, fitTick, clipPlane, highlight, onPick }:
         new THREE.LineBasicMaterial({ color: '#1e293b' }),
       )
       lines.name = '__edges'
-      mesh.add(lines)
+      if (!(keepMaterials && (mesh.material as THREE.Material).transparent)) mesh.add(lines) // no edge clutter on see-through layers
     })
     return clone
-  }, [scene])
+  }, [scene, keepMaterials])
+
+  useEffect(() => {
+    const hide = new Set(hiddenLayers ?? [])
+    root.traverse((o) => {
+      if (o.name && o.name !== '__edges' && (hide.has(o.name) || hide.has(o.parent?.name ?? ''))) o.visible = false
+      else if (o.name && o.name !== '__edges') o.visible = true
+    })
+    invalidate()
+  }, [root, hiddenLayers, invalidate])
 
   useEffect(() => {
     root.traverse((o) => {
